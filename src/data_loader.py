@@ -150,7 +150,7 @@ def get_dataloaders(root_path, batch_size):
 
 if __name__ == "__main__":
 
-    root = "/kaggle/input/breastdm/BreastDM"
+    root = "/kaggle/input/breastdm"
 
     train_loader, val_loader, test_loader = get_dataloaders(root,4)
 
