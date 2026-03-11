@@ -41,8 +41,7 @@ def build_model(name):
     if name == 'vgg16': return Models.VGG16(args.num_classes)
     if name == 'senet50': return Models.SENet50(args.num_classes)
     if name == 'resnext101': return Models.ResNeXt101(args.num_classes)
-    if name == "Fusion_model": return Fusion_model.FusionModel(args.num_classes)
-    
+    if name == "fusion_model": return Fusion_model.FusionModel(args.num_classes)
     if name in ['vit', 'vit_full']:
         # Load pretrained ViT-B/16 từ timm
         model = timm.create_model('vit_base_patch16_224', pretrained=True, num_classes=args.num_classes)
