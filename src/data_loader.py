@@ -121,7 +121,7 @@ def load_testing(root_path, phase='val', batch_size=32, num_workers=4):
     return loader, dataset.labels
 if __name__ == "__main__":
 
-    DATA_PATH = "/kaggle/input/breastdm"
+    DATA_PATH = "/kaggle/input/breastdm/cls"
 
     train_loader = load_training(DATA_PATH, "train", batch_size=8)
     val_loader, labels = load_testing(DATA_PATH, "val", batch_size=8)
