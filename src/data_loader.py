@@ -61,10 +61,15 @@ class BreastDMExp1Dataset(Dataset):
 
         data = np.load(path)
         # Ensure shape (9,1,H,W)
-
         if len(data.shape) == 3:
             data = data[:, None, :, :]
-
+        # case 1: (9,H,W)
+        if data.shape[0] == 9:
+            data = data[:, None, :, :]
+        # case 2: (H,W,9)
+        elif data.shape[-1] == 9:
+            data = data.transpose(2,0,1)
+            data = data[:, None, :, :]
         elif len(data.shape) == 4:
             data = data.transpose(0,3,1,2)
 
