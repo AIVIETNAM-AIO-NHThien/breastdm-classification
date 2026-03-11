@@ -17,13 +17,11 @@ class BreastDMExp1Dataset(Dataset):
         self.samples = []
         self.labels = []
 
-        # load class names
         classes = sorted([
             c for c in os.listdir(self.root_path)
             if os.path.isdir(os.path.join(self.root_path, c))
         ])
 
-        # scan dataset
         for label, cls in enumerate(classes):
             cls_path = os.path.join(self.root_path, cls)
             for case in os.listdir(cls_path):
@@ -42,60 +40,37 @@ class BreastDMExp1Dataset(Dataset):
         path = self.samples[idx]
         label = self.labels[idx]
 
-        data = np.load(path)
+        data = np.load(path)  # shape: (H,W,9)
+        data = data.transpose(2,0,1)[:, None, :, :]  # (9,1,H,W)
 
-        # ---------- FIX SHAPE ROBUST ----------
-        # Goal: (num_slices, 1, H, W)
-        if data.ndim == 2:  # single slice (H,W)
-            data = data[None, None, :, :]
-        elif data.ndim == 3:
-            if data.shape[0] == 9:  # (9,H,W)
-                data = data[:, None, :, :]
-            elif data.shape[2] == 9:  # (H,W,9)
-                data = data.transpose(2,0,1)[:, None, :, :]
-            else:  # (H,W,C=1)
-                data = data.transpose(2,0,1)
-        elif data.ndim == 4:
-            # (9,H,W,1) -> (9,1,H,W)
-            if data.shape[-1] == 1:
-                data = data.squeeze(-1)[:, None, :, :]
-            else:
-                raise ValueError(f"Unexpected 4D shape: {data.shape}")
-        else:
-            raise ValueError(f"Unexpected data shape: {data.shape}")
-        # --------------------------------------
-
-        # Convert slices to PIL images
+        # Convert to PIL images
         imgs = [F.to_pil_image(data[i]) for i in range(data.shape[0])]
 
         processed = []
 
         if self.split == "train":
-            # Resize first
-            imgs = [F.resize(img, (256,256)) for img in imgs]
-
-            # same random crop for all slices
+            imgs = [F.resize(img,(256,256)) for img in imgs]
             i,j,h,w = transforms.RandomCrop.get_params(imgs[0], (224,224))
             do_hflip = random.random() > 0.5
             do_vflip = random.random() > 0.5
 
             for img in imgs:
-                img = F.crop(img, i,j,h,w)
+                img = F.crop(img,i,j,h,w)
                 if do_hflip:
                     img = F.hflip(img)
                 if do_vflip:
                     img = F.vflip(img)
                 img = F.to_tensor(img)
-                img = F.normalize(img, NORM_MEAN, NORM_STD)
+                img = F.normalize(img,NORM_MEAN,NORM_STD)
                 processed.append(img)
         else:
             for img in imgs:
-                img = F.resize(img, (224,224))
+                img = F.resize(img,(224,224))
                 img = F.to_tensor(img)
-                img = F.normalize(img, NORM_MEAN, NORM_STD)
+                img = F.normalize(img,NORM_MEAN,NORM_STD)
                 processed.append(img)
 
-        data = torch.stack(processed)  # (num_slices, 1, H, W)
+        data = torch.stack(processed)  # (9,1,H,W)
         return data, label
 
 # ---------------- DATALOADER -----------------
@@ -117,6 +92,7 @@ def get_dataloaders(root_path, batch_size):
     test_loader = build_dataloader(root_path, "test", batch_size)
     return train_loader, val_loader, test_loader
 
+# ---------------- TEST -----------------
 if __name__ == "__main__":
     root = "/kaggle/input/breastdm/cls"
     train_loader, val_loader, test_loader = get_dataloaders(root, 4)
