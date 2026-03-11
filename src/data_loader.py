@@ -5,7 +5,6 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 
-# -------- ImageNet normalization --------
 NORM_MEAN = [0.485, 0.456, 0.406]
 NORM_STD = [0.229, 0.224, 0.225]
 
@@ -83,7 +82,7 @@ class CachedNPYDataset(Dataset):
 
 
 # -------- Data Loaders --------
-def load_training(root_path, phase='train', batch_size=32, num_workers=2):
+def load_training(root_path, phase='train', batch_size=32, num_workers=4):
 
     transform = get_transforms(True)
 
@@ -102,7 +101,7 @@ def load_training(root_path, phase='train', batch_size=32, num_workers=2):
     )
 
 
-def load_testing(root_path, phase='val', batch_size=32, num_workers=2):
+def load_testing(root_path, phase='val', batch_size=32, num_workers=4):
 
     transform = get_transforms(False)
 
@@ -120,3 +119,17 @@ def load_testing(root_path, phase='val', batch_size=32, num_workers=2):
     )
 
     return loader, dataset.labels
+if __name__ == "__main__":
+
+    DATA_PATH = "/kaggle/input/breastdm"
+
+    train_loader = load_training(DATA_PATH, "train", batch_size=8)
+    val_loader, labels = load_testing(DATA_PATH, "val", batch_size=8)
+
+    print("Train batches:", len(train_loader))
+    print("Val batches:", len(val_loader))
+
+    for images, targets in train_loader:
+        print("Image shape:", images.shape)
+        print("Labels:", targets)
+        break
