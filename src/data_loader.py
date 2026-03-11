@@ -6,22 +6,30 @@ import random
 from torchvision import transforms
 import torchvision.transforms.functional as F
 
+# ---------------- CONSTANTS -----------------
 NORM_MEAN = [0.485]
 NORM_STD = [0.229]
 
+# ---------------- DATASET -----------------
 class BreastDMExp1Dataset(Dataset):
     def __init__(self, root_path, split="train"):
+        """
+        root_path: thư mục cls chứa img9Se
+        split: 'train', 'val', 'test'
+        """
         self.split = split
         self.root_path = os.path.join(root_path, "img9Se", split)
 
         self.samples = []
         self.labels = []
 
+        # load class names
         classes = sorted([
             c for c in os.listdir(self.root_path)
             if os.path.isdir(os.path.join(self.root_path, c))
         ])
 
+        # scan all .npy files
         for label, cls in enumerate(classes):
             cls_path = os.path.join(self.root_path, cls)
             for case in os.listdir(cls_path):
@@ -40,34 +48,40 @@ class BreastDMExp1Dataset(Dataset):
         path = self.samples[idx]
         label = self.labels[idx]
 
-        data = np.load(path)  # shape: (H,W,9)
-        data = data.transpose(2,0,1)[:, None, :, :]  # (9,1,H,W)
+        # ---------- LOAD AND FIX SHAPE ----------
+        data = np.load(path)           # shape: (H,W,9)
+        data = data.transpose(2,0,1)  # (9,H,W)
+        data = data[:, None, :, :]     # (9,1,H,W)
 
-        # Convert to PIL images
+        # Convert each slice to PIL
         imgs = [F.to_pil_image(data[i]) for i in range(data.shape[0])]
 
         processed = []
 
         if self.split == "train":
-            imgs = [F.resize(img,(256,256)) for img in imgs]
+            # Resize to 256x256 first
+            imgs = [F.resize(img, (256,256)) for img in imgs]
+
+            # Random crop 224x224, same params for all slices
             i,j,h,w = transforms.RandomCrop.get_params(imgs[0], (224,224))
             do_hflip = random.random() > 0.5
             do_vflip = random.random() > 0.5
 
             for img in imgs:
-                img = F.crop(img,i,j,h,w)
+                img = F.crop(img, i,j,h,w)
                 if do_hflip:
                     img = F.hflip(img)
                 if do_vflip:
                     img = F.vflip(img)
                 img = F.to_tensor(img)
-                img = F.normalize(img,NORM_MEAN,NORM_STD)
+                img = F.normalize(img, NORM_MEAN, NORM_STD)
                 processed.append(img)
         else:
+            # val/test: resize only
             for img in imgs:
                 img = F.resize(img,(224,224))
                 img = F.to_tensor(img)
-                img = F.normalize(img,NORM_MEAN,NORM_STD)
+                img = F.normalize(img, NORM_MEAN, NORM_STD)
                 processed.append(img)
 
         data = torch.stack(processed)  # (9,1,H,W)
