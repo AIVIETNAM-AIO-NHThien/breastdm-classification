@@ -1,57 +1,57 @@
-
-import os
-import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
+import numpy as np
+import os
+import random
 from torchvision import transforms
+import torchvision.transforms.functional as F
 
-NORM_MEAN = [0.485, 0.456, 0.406]
-NORM_STD = [0.229, 0.224, 0.225]
-
-IMG_SIZE = 224
-
-
-# -------- Transforms --------
-def get_transforms(is_train=True):
-
-    if is_train:
-        return transforms.Compose([
-            transforms.RandomHorizontalFlip(),
-            transforms.RandomVerticalFlip(),
-            transforms.Normalize(NORM_MEAN, NORM_STD)
-        ])
-    else:
-        return transforms.Compose([
-            transforms.Normalize(NORM_MEAN, NORM_STD)
-        ])
+NORM_MEAN = [0.485]
+NORM_STD = [0.229]
 
 
-# -------- Dataset --------
-class CachedNPYDataset(Dataset):
+class BreastDMExp1Dataset(Dataset):
 
-    def __init__(self, root_dir, transform=None):
+    def __init__(self, root_path, split="train"):
+
+
+        self.split = split
+        self.root_path = os.path.join(root_path, "img9Se", split)
 
         self.samples = []
         self.labels = []
-        self.transform = transform
 
-        classes = sorted(os.listdir(root_dir))
-        self.class_to_idx = {cls: i for i, cls in enumerate(classes)}
+        # load class names
+        classes = sorted([
+            c for c in os.listdir(self.root_path)
+            if os.path.isdir(os.path.join(self.root_path, c))
+        ])
 
-        for cls in classes:
+        # scan dataset
+        for label, cls in enumerate(classes):
 
-            cls_path = os.path.join(root_dir, cls)
+            cls_path = os.path.join(self.root_path, cls)
 
-            for root, _, files in os.walk(cls_path):
+            for case in os.listdir(cls_path):
 
-                for f in files:
+                case_path = os.path.join(cls_path, case)
 
-                    if f.lower().endswith(".npy"):
+                if not os.path.isdir(case_path):
+                    continue
 
-                        self.samples.append(os.path.join(root, f))
-                        self.labels.append(self.class_to_idx[cls])
+                for file in os.listdir(case_path):
+
+                    if file.endswith(".npy"):
+
+                        self.samples.append(
+                            os.path.join(case_path, file)
+                        )
+
+                        self.labels.append(label)
+
 
     def __len__(self):
+
         return len(self.samples)
 
     def __getitem__(self, idx):
@@ -59,77 +59,109 @@ class CachedNPYDataset(Dataset):
         path = self.samples[idx]
         label = self.labels[idx]
 
-        img = np.load(path)
+        data = np.load(path)
+        # Ensure shape (9,1,H,W)
 
-        img = torch.tensor(img).float()
+        if len(data.shape) == 3:
+            data = data[:, None, :, :]
 
-        # scale pixel
-        img = img / 255.0
-
-        # nếu grayscale
-        if len(img.shape) == 2:
-            img = img.unsqueeze(0)
-            img = img.repeat(3, 1, 1)
-
-        # nếu HWC -> CHW
-        elif len(img.shape) == 3 and img.shape[0] != 3:
-            img = img.permute(2, 0, 1)
-
-        if self.transform:
-            img = self.transform(img)
-
-        return img, label
+        elif len(data.shape) == 4:
+            data = data.transpose(0,3,1,2)
 
 
-# -------- Data Loaders --------
-def load_training(root_path, phase='train', batch_size=32, num_workers=4):
-
-    transform = get_transforms(True)
-
-    dataset = CachedNPYDataset(
-        os.path.join(root_path, phase),
-        transform
-    )
-
-    return DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=num_workers,
-        pin_memory=True,
-        drop_last=True
-    )
+        imgs = [F.to_pil_image(data[i]) for i in range(data.shape[0])]
 
 
-def load_testing(root_path, phase='val', batch_size=32, num_workers=4):
+        if self.split == "train":
 
-    transform = get_transforms(False)
+            imgs = [F.resize(img,(256,256)) for img in imgs]
 
-    dataset = CachedNPYDataset(
-        os.path.join(root_path, phase),
-        transform
-    )
+            # same random crop for all slices
+            i,j,h,w = transforms.RandomCrop.get_params(imgs[0],(224,224))
+
+            do_hflip = random.random() > 0.5
+            do_vflip = random.random() > 0.5
+
+            processed = []
+
+            for img in imgs:
+
+                img = F.crop(img,i,j,h,w)
+
+                if do_hflip:
+                    img = F.hflip(img)
+
+                if do_vflip:
+                    img = F.vflip(img)
+
+                img = F.to_tensor(img)
+
+                img = F.normalize(img,NORM_MEAN,NORM_STD)
+
+                processed.append(img)
+
+        else:
+
+            processed = []
+
+            for img in imgs:
+
+                img = F.resize(img,(224,224))
+
+                img = F.to_tensor(img)
+
+                img = F.normalize(img,NORM_MEAN,NORM_STD)
+
+                processed.append(img)
+
+
+        data = torch.stack(processed)
+
+        return data, label
+
+
+def build_dataloader(root_path, split, batch_size):
+
+    dataset = BreastDMExp1Dataset(root_path, split)
 
     loader = DataLoader(
         dataset,
         batch_size=batch_size,
-        shuffle=False,
-        num_workers=num_workers,
-        pin_memory=True
+        shuffle=(split=="train"),
+        num_workers=2,
+        pin_memory=True,
+        drop_last=(split=="train")
     )
 
-    return loader, dataset.labels
+    return loader
+
+
+def get_dataloaders(root_path, batch_size):
+
+    train_loader = build_dataloader(root_path,"train",batch_size)
+
+    val_loader = build_dataloader(root_path,"val",batch_size)
+
+    test_loader = build_dataloader(root_path,"test",batch_size)
+
+    return train_loader, val_loader, test_loader
+
+
+
 if __name__ == "__main__":
 
-    DATA_PATH = "/kaggle/input/breastdm/cls/img9Se"
+    root = "/kaggle/input/breastdm/BreastDM"
 
-    train_loader = load_training(DATA_PATH, "train", batch_size=8)
-    val_loader, labels = load_testing(DATA_PATH, "val", batch_size=8)
+    train_loader, val_loader, test_loader = get_dataloaders(root,4)
 
-    print("Train batches:", len(train_loader))
-    print("Val batches:", len(val_loader))
+    print("Train size:",len(train_loader.dataset))
+    print("Val size:",len(val_loader.dataset))
+    print("Test size:",len(test_loader.dataset))
 
-    for images, targets in train_loader:
-        print("Image shape:", images.shape)
-        print("Labels:", targets)
+
+    for data,label in train_loader:
+
+        print("Batch shape:",data.shape)
+        print("Labels:",label)
+
         break
