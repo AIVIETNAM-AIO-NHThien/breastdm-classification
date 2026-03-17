@@ -1,16 +1,13 @@
 import pretrainedmodels.models
 import torch.nn as nn
-import math
-import torch.utils.model_zoo as model_zoo
 import torch
-from torchvision import models
 import torch.nn.functional as F
 import pretrainedmodels.models as premodels 
 
 class Senet101(nn.Module):
     def __init__(self, num_classes=2):
         super(Senet101, self).__init__()
-        model_se = premodels.se_resnet101()
+        model_se = premodels.se_resnet101(pretrained='imagenet')
         self.layer0 = model_se.layer0
         self.layer1 = model_se.layer1
         self.layer2 = model_se.layer2
@@ -36,16 +33,16 @@ class Senet101(nn.Module):
 class Senet50(nn.Module):
     def __init__(self,num_classes=2):
         super(Senet50, self).__init__()
-        model_se = premodels.se_resnet50()
+        model_se = premodels.se_resnet50(pretrained='imagenet')
         self.layer0 = model_se.layer0
         self.layer1 = model_se.layer1
         self.layer2 = model_se.layer2
         self.layer3 = model_se.layer3
-
         self.layer4 = model_se.layer4
         self.avgpool = model_se.avg_pool
         self.dropout = model_se.dropout
         self.fc = nn.Linear(2048, num_classes)
+
     def forward(self,x):
         x = self.layer0(x)
         x = self.layer1(x)
