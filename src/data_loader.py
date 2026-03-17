@@ -7,7 +7,6 @@ import random
 
 class BreastDCE_Dataset(Dataset):
     def __init__(self, root_path, split="train"):
-
         self.root = os.path.join(root_path, split)
         self.split = split
 
@@ -36,10 +35,13 @@ class BreastDCE_Dataset(Dataset):
         path = self.samples[idx]
         label = self.labels[idx]
 
-        # -------- LOAD --------
-        data = np.load(path).astype(np.float32)  # (H,W,9)
+        # Load (H,W,9)
+        data = np.load(path).astype(np.float32)
 
-        data = data.transpose(2, 0, 1)  # (9,H,W)
+
+        #  Convert -> (9,H,W)
+ 
+        data = data.transpose(2, 0, 1)
 
         data = data - data[0:1, :, :]
 
@@ -49,9 +51,16 @@ class BreastDCE_Dataset(Dataset):
 
         data = torch.from_numpy(data)  # (9,H,W)
 
+ 
+        # Resize -> 256
         data = data.unsqueeze(0)  # (1,9,H,W)
-        data = F.interpolate(data, size=(256, 256), mode='bilinear', align_corners=False)
-        data = data.squeeze(0)    # (9,256,256)
+        data = F.interpolate(
+            data,
+            size=(256, 256),
+            mode='bilinear',
+            align_corners=False
+        )
+        data = data.squeeze(0)  # (9,256,256)
 
         if self.split == "train":
             i = random.randint(0, 256 - 224)
@@ -65,7 +74,11 @@ class BreastDCE_Dataset(Dataset):
         else:
             data = data[:, 16:240, 16:240]
 
+        data = torch.clamp(data, -3, 3)
+        data = (data + 3) / 6  # → [0,1]
+
         return data, label
+
 
 def build_dataloader(root_path, split, batch_size, num_workers=2):
     dataset = BreastDCE_Dataset(root_path, split)
@@ -91,14 +104,14 @@ def get_dataloaders(root_path, batch_size):
 
 
 if __name__ == "__main__":
-    root = "/kaggle/input/breastdm/cls/img9Se" 
+    root = "/kaggle/input/breastdm/cls/img9Se"
 
     train_loader, val_loader, test_loader = get_dataloaders(root, batch_size=4)
 
     print("Train size:", len(train_loader.dataset))
 
     for x, y in train_loader:
-        print("Batch shape:", x.shape)  #(B,9,224,224)
+        print("Batch shape:", x.shape)  # (B,9,224,224)
         print("Min/Max:", x.min().item(), x.max().item())
         print("Labels:", y)
         break
