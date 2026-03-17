@@ -50,7 +50,7 @@ class BreastDCE_Dataset(Dataset):
         data = torch.from_numpy(data)  # (9,H,W)
 
         data = data.unsqueeze(0)  # (1,9,H,W)
-        data = F.interpolate(data, size=(9, 256, 256), mode='trilinear', align_corners=False)
+        data = F.interpolate(data, size=(9, 256, 256), mode='bilinear', align_corners=False)
         data = data.squeeze(0)    # (9,256,256)
 
         if self.split == "train":
