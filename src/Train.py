@@ -33,7 +33,7 @@ def forward_slices(model, x):
     x = (x - IMAGENET_MEAN)/IMAGENET_STD
     out = model(x)             # (B*9,2)
     out = out.view(B,S,-1)     # (B,9,2)
-    out = out.mean(dim=1)      # average
+    out = out.max(dim=1)[0]      # average
     return out
 
 def train_one_epoch(model, loader, optimizer, criterion):
