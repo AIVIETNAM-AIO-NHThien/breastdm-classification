@@ -7,7 +7,7 @@ from data_loader import get_dataloaders
 from Models import Senet50, Senet101
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-EPOCHS = 50
+EPOCHS = 30
 BATCH_SIZE = 8
 LR = 3e-5
 NUM_CLASSES = 2
