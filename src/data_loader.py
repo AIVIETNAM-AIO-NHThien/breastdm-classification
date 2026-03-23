@@ -78,10 +78,10 @@ def build_dataloader(root_path, split, batch_size, num_workers=2):
                         drop_last=(split=="train"))
     return loader
 
-def get_dataloaders(root_path, batch_size):
-    train_loader = build_dataloader(root_path, "train", batch_size)
-    val_loader   = build_dataloader(root_path, "val", batch_size)
-    test_loader  = build_dataloader(root_path, "test", batch_size)
+def get_dataloaders(root_path, batch_size, num_workers=2):
+    train_loader = build_dataloader(root_path, "train", batch_size, num_workers)
+    val_loader   = build_dataloader(root_path, "val", batch_size, num_workers)
+    test_loader  = build_dataloader(root_path, "test", batch_size, num_workers)
     return train_loader, val_loader, test_loader
 
 if __name__ == "__main__":
