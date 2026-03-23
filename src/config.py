@@ -14,7 +14,7 @@ VIT_PRETRAINED_PATH = "./model/vit_base_patch16_224_in21k.pth"
 # ==================== TRAINING ====================
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 EPOCHS = 100
-EARLY_STOPPING_PATIENCE = 0  # số epoch không cải thiện thì dừng
+EARLY_STOPPING_PATIENCE = 100  # số epoch không cải thiện thì dừng
 
 # ==================== HYPERPARAMETERS ====================
 OPTIMIZER = "AdamW"           # "AdamW" hoặc "SGD"
