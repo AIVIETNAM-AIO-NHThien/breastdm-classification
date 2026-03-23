@@ -18,7 +18,7 @@ EARLY_STOPPING_PATIENCE = 15   # số epoch không cải thiện thì dừng
 
 # ==================== HYPERPARAMETERS ====================
 OPTIMIZER = "AdamW"           # "AdamW" hoặc "SGD"
-LR = 5e-5
+LR = 1e-4
 WEIGHT_DECAY = 1e-3
 MOMENTUM = 0.9 if OPTIMIZER == "SGD" else None
 
