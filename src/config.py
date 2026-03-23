@@ -28,7 +28,7 @@ SCHEDULER_PATIENCE = 5
 SCHEDULER_FACTOR = 0.5
 
 # Regularization (dropout)
-DROPOUT = 0.2
+DROPOUT = 0.1
 ATTN_DROPOUT = 0.1
 
 # ==================== CLASS WEIGHTS ====================
