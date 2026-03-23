@@ -5,7 +5,6 @@ import pretrainedmodels.models as premodels
 from torch import nn
 import torch.nn.functional as F
 import torch
-from ViT import VisionTransformer
 
 class NLBlockND(nn.Module):
     def __init__(self, in_channels, inter_channels=None, mode='embedded',
