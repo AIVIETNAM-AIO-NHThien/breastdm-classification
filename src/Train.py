@@ -7,16 +7,7 @@ import numpy as np
 
 from data_loader import get_dataloaders
 from Fusion import FusionM_9ch
-
-# ==================== CONFIGURATION ====================
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-EPOCHS = 50
-BATCH_SIZE = 4  
-LR = 1e-4  
-NUM_CLASSES = 2
-DATA_PATH = "/kaggle/input/breastdm/cls/img9Se"
-VIT_PRETRAINED_PATH = "./model/vit_base_patch16_224_in21k.pth"  
-LOAD_VIT = True  # Set pretrained
+import config 
 
 # ==================== TRAINING FUNCTIONS ====================
 def train_one_epoch(model, loader, optimizer, criterion, scaler=None):
@@ -27,11 +18,10 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler=None):
     
     pbar = tqdm(loader, desc="Training")
     for x, y in pbar:
-        x, y = x.to(DEVICE), y.to(DEVICE)
+        x, y = x.to(config.DEVICE), y.to(config.DEVICE)
         
         optimizer.zero_grad()
         
-        # Mixed precision training (optional, helps with memory)
         if scaler:
             with torch.cuda.amp.autocast():
                 outputs = model(x)
@@ -50,7 +40,6 @@ def train_one_epoch(model, loader, optimizer, criterion, scaler=None):
         correct += predicted.eq(y).sum().item()
         total += y.size(0)
         
-        # Update progress bar
         pbar.set_postfix({
             'loss': f'{loss.item():.4f}',
             'acc': f'{100.*correct/total:.2f}%'
@@ -68,7 +57,7 @@ def evaluate(model, loader, criterion):
     with torch.no_grad():
         pbar = tqdm(loader, desc="Evaluating")
         for x, y in pbar:
-            x, y = x.to(DEVICE), y.to(DEVICE)
+            x, y = x.to(config.DEVICE), y.to(config.DEVICE)
             outputs = model(x)
             loss = criterion(outputs, y)
             
@@ -86,14 +75,13 @@ def evaluate(model, loader, criterion):
 
 
 def compute_class_weights(loader):
-    """Compute class weights for imbalanced dataset"""
     labels = []
     for _, y in loader:
         labels.extend(y.cpu().numpy())
     class_counts = np.bincount(labels)
     weights = 1.0 / class_counts
     weights = weights / weights.sum() * len(class_counts)
-    return torch.FloatTensor(weights).to(DEVICE)
+    return torch.FloatTensor(weights).to(config.DEVICE)
 
 
 # ==================== MAIN ====================
@@ -104,26 +92,31 @@ def main():
     
     # 1. Load data
     print("\n[1] Loading data...")
-    train_loader, val_loader, test_loader = get_dataloaders(DATA_PATH, BATCH_SIZE)
+    train_loader, val_loader, test_loader = get_dataloaders(
+        config.DATA_PATH, config.BATCH_SIZE, config.NUM_WORKERS
+    )
     print(f"Train samples: {len(train_loader.dataset)}")
     print(f"Val samples: {len(val_loader.dataset)}")
     print(f"Test samples: {len(test_loader.dataset)}")
     
-    # 2. Compute class weights (optional)
+    # 2. Class weights
     print("\n[2] Computing class weights...")
-    class_weights = compute_class_weights(train_loader)
+    if config.CLASS_WEIGHTS is None:
+        class_weights = compute_class_weights(train_loader)
+    else:
+        class_weights = torch.FloatTensor(config.CLASS_WEIGHTS).to(config.DEVICE)
     print(f"Class weights: {class_weights.cpu().numpy()}")
     
     # 3. Build model
     print("\n[3] Building Fusion Model...")
     model = FusionM_9ch(
-        num_classes=NUM_CLASSES,
-        load_vit=LOAD_VIT,
-        vit_pretrained_path=VIT_PRETRAINED_PATH if LOAD_VIT else None
-    )
-    model = model.to(DEVICE)
+        num_classes=config.NUM_CLASSES,
+        load_vit=config.LOAD_VIT,
+        vit_pretrained_path=config.VIT_PRETRAINED_PATH if config.LOAD_VIT else None,
+        drop_ratio=config.DROPOUT,
+        attn_drop_ratio=config.ATTN_DROPOUT
+    ).to(config.DEVICE)
     
-    # Count parameters
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Total parameters: {total_params:,}")
@@ -131,29 +124,33 @@ def main():
     
     # 4. Setup optimizer and loss
     print("\n[4] Setting up optimizer...")
-    optimizer = optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)
+    if config.OPTIMIZER == "AdamW":
+        optimizer = optim.AdamW(model.parameters(), lr=config.LR, weight_decay=config.WEIGHT_DECAY)
+    else:  # SGD
+        optimizer = optim.SGD(model.parameters(), lr=config.LR, momentum=config.MOMENTUM, weight_decay=config.WEIGHT_DECAY)
     
     # Learning rate scheduler
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
+    if config.SCHEDULER == "CosineAnnealing":
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config.EPOCHS)
+    else:  # ReduceLROnPlateau
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=config.SCHEDULER_FACTOR, patience=config.SCHEDULER_PATIENCE)
     
-    # Loss function with class weights
     criterion = nn.CrossEntropyLoss(weight=class_weights)
+    scaler = torch.cuda.amp.GradScaler() if config.DEVICE == "cuda" else None
     
-    # Mixed precision training (if CUDA available)
-    scaler = torch.cuda.amp.GradScaler() if DEVICE == "cuda" else None
-    
-    # 5. Training loop
+    # 5. Training loop with early stopping
     print("\n[5] Starting training...")
     best_val_acc = 0
     best_epoch = 0
-    train_losses = []
-    val_losses = []
-    train_accs = []
-    val_accs = []
+    best_val_loss = float('inf')
+    patience_counter = 0
     
-    for epoch in range(EPOCHS):
+    train_losses, val_losses = [], []
+    train_accs, val_accs = [], []
+    
+    for epoch in range(config.EPOCHS):
         print(f"\n{'='*50}")
-        print(f"Epoch {epoch+1}/{EPOCHS}")
+        print(f"Epoch {epoch+1}/{config.EPOCHS}")
         print(f"Learning Rate: {optimizer.param_groups[0]['lr']:.6f}")
         print(f"{'='*50}")
         
@@ -167,18 +164,22 @@ def main():
         val_losses.append(val_loss)
         val_accs.append(val_acc)
         
-        # Update scheduler
-        scheduler.step()
+        # Scheduler step
+        if config.SCHEDULER == "ReduceLROnPlateau":
+            scheduler.step(val_loss)
+        else:
+            scheduler.step()
         
         # Print summary
         print(f"\n📊 Summary:")
         print(f"   Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.4f}")
         print(f"   Val   Loss: {val_loss:.4f} | Val   Acc: {val_acc:.4f}")
         
-        # Save best model
+        # Save best model based on validation accuracy
         if val_acc > best_val_acc:
             best_val_acc = val_acc
             best_epoch = epoch + 1
+            best_val_loss = val_loss
             torch.save({
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
@@ -187,6 +188,12 @@ def main():
                 'train_acc': train_acc,
             }, 'best_fusion_model.pth')
             print(f"   ✅ Saved best model! (Val Acc: {val_acc:.4f})")
+            patience_counter = 0
+        else:
+            patience_counter += 1
+            if patience_counter >= config.EARLY_STOPPING_PATIENCE:
+                print(f"   ⏹️ Early stopping triggered after {epoch+1} epochs")
+                break
     
     # 6. Test best model
     print(f"\n{'='*50}")
@@ -202,7 +209,7 @@ def main():
     print(f"   Test Acc: {test_acc:.4f}")
     print(f"   Test Loss: {test_loss:.4f}")
     
-    # Save final results
+    # Save results
     results = {
         'best_val_acc': best_val_acc,
         'best_epoch': best_epoch,
@@ -215,30 +222,22 @@ def main():
     }
     torch.save(results, 'training_results.pth')
     
-    # Plot training curves (optional)
+    # Plot curves
     try:
         import matplotlib.pyplot as plt
-        
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
-        
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12,4))
         ax1.plot(train_losses, label='Train Loss')
         ax1.plot(val_losses, label='Val Loss')
         ax1.set_xlabel('Epoch')
         ax1.set_ylabel('Loss')
-        ax1.set_title('Training and Validation Loss')
         ax1.legend()
-        ax1.grid(True)
-        
         ax2.plot(train_accs, label='Train Acc')
         ax2.plot(val_accs, label='Val Acc')
         ax2.set_xlabel('Epoch')
         ax2.set_ylabel('Accuracy')
-        ax2.set_title('Training and Validation Accuracy')
         ax2.legend()
-        ax2.grid(True)
-        
         plt.tight_layout()
-        plt.savefig('training_curves.png', dpi=150)
+        plt.savefig('training_curves.png')
         print("\n📈 Training curves saved as 'training_curves.png'")
     except:
         pass

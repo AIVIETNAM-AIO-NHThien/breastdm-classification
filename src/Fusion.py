@@ -6,6 +6,7 @@ from torch import nn
 import torch.nn.functional as F
 import torch
 
+
 class NLBlockND(nn.Module):
     def __init__(self, in_channels, inter_channels=None, mode='embedded',
                  dimension=2, bn_layer=True):
@@ -377,23 +378,24 @@ class FCUUp(nn.Module):
 
 # ==================== FUSION MODEL HOÀN CHỈNH ====================
 class FusionM_9ch(nn.Module):
-    def __init__(self, num_classes=2, load_vit=False, vit_pretrained_path=None):
+    def __init__(self, num_classes=2, load_vit=False, vit_pretrained_path=None,
+                 drop_ratio=0.0, attn_drop_ratio=0.0):
         super(FusionM_9ch, self).__init__()
         
         # CNN branch with 9 channels
         self.cnn = SEResNet_9ch()
         
-        # ViT branch with 9 channels
+        # ViT branch with 9 channels (có thể điều chỉnh dropout)
         self.vit = VisionTransformer_9ch(
             img_size=224,
             patch_size=16,
-            in_c=9,  # ← 9 CHANNELS
+            in_c=9,                 # 9 channels
             num_classes=num_classes,
             embed_dim=768,
             depth=7,
             num_heads=12,
-            drop_ratio=0.,
-            attn_drop_ratio=0.
+            drop_ratio=drop_ratio,          # ← tham số từ config
+            attn_drop_ratio=attn_drop_ratio # ← tham số từ config
         )
         
         # Non-local block
@@ -484,9 +486,3 @@ if __name__ == '__main__':
     print(f"Input shape: {a.shape}")
     print(f"Output shape: {out.shape}")
     print(f"Output: {out}")
-    
-    # Test với pretrained ViT (nếu có file)
-    # model_pretrained = FusionM_9ch(num_classes=2, load_vit=True, 
-    #                                 vit_pretrained_path='./model/vit_base_patch16_224_in21k.pth')
-    # out_pretrained = model_pretrained(a)
-    # print(f"Output with pretrained: {out_pretrained.shape}")
