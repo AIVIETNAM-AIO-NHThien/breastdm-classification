@@ -13,8 +13,8 @@ VIT_PRETRAINED_PATH = "./model/vit_base_patch16_224_in21k.pth"
 
 # ==================== TRAINING ====================
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-EPOCHS = 30
-EARLY_STOPPING_PATIENCE = 10   # số epoch không cải thiện thì dừng
+EPOCHS = 100
+EARLY_STOPPING_PATIENCE = 15   # số epoch không cải thiện thì dừng
 
 # ==================== HYPERPARAMETERS ====================
 OPTIMIZER = "AdamW"           # "AdamW" hoặc "SGD"
@@ -28,7 +28,7 @@ SCHEDULER_PATIENCE = 5
 SCHEDULER_FACTOR = 0.5
 
 # Regularization (dropout)
-DROPOUT = 0.1
+DROPOUT = 0.2
 ATTN_DROPOUT = 0.1
 
 # ==================== CLASS WEIGHTS ====================
