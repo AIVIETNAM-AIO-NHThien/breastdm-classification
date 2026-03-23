@@ -349,13 +349,11 @@ class SEResNet_9ch(nn.Module):
         self.layer0 = model_se.layer0
         self.layer1 = model_se.layer1
         self.layer2 = model_se.layer2
-        self.layer3 = model_se.layer3
     
     def forward(self, x):
         x = self.layer0(x)
         x = self.layer1(x)
         x = self.layer2(x)  # (B, 512, 28, 28)
-        x = self.layer3(x)
         return x
 
 
