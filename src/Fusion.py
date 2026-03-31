@@ -392,7 +392,7 @@ class FusionM_9ch(nn.Module):
             in_c=9,                 # 9 channels
             num_classes=num_classes,
             embed_dim=768,
-            depth=7,
+            depth=12,
             num_heads=12,
             drop_ratio=drop_ratio,          # ← tham số từ config
             attn_drop_ratio=attn_drop_ratio # ← tham số từ config

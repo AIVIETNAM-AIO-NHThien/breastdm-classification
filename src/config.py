@@ -19,7 +19,7 @@ EARLY_STOPPING_PATIENCE = 100  # số epoch không cải thiện thì dừng
 # ==================== HYPERPARAMETERS ====================
 OPTIMIZER = "AdamW"           # "AdamW" hoặc "SGD"
 LR = 1e-4
-WEIGHT_DECAY = 1e-3
+WEIGHT_DECAY = 1e-2
 MOMENTUM = 0.9 if OPTIMIZER == "SGD" else None
 
 # Learning rate scheduler
