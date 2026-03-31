@@ -14,12 +14,12 @@ VIT_PRETRAINED_PATH = "./model/vit_base_patch16_224_in21k.pth"
 # ==================== TRAINING ====================
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 EPOCHS = 100
-EARLY_STOPPING_PATIENCE = 100  # số epoch không cải thiện thì dừng
+EARLY_STOPPING_PATIENCE = 30  # số epoch không cải thiện thì dừng
 
 # ==================== HYPERPARAMETERS ====================
 OPTIMIZER = "AdamW"           # "AdamW" hoặc "SGD"
-LR = 1e-4
-WEIGHT_DECAY = 1e-2
+LR = 0.01
+WEIGHT_DECAY = 0.01
 MOMENTUM = 0.9 if OPTIMIZER == "SGD" else None
 
 # Learning rate scheduler
@@ -28,8 +28,8 @@ SCHEDULER_PATIENCE = 5
 SCHEDULER_FACTOR = 0.5
 
 # Regularization (dropout)
-DROPOUT = 0.1
-ATTN_DROPOUT = 0.1
+DROPOUT = 0.2
+ATTN_DROPOUT = 0.2
 
 # ==================== CLASS WEIGHTS ====================
 # Nếu muốn tính từ loader, để None; nếu muốn set tay, gán giá trị
