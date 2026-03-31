@@ -458,6 +458,8 @@ class FusionM_9ch(nn.Module):
         # Convert tokens to spatial feature map
         vit_features = self.fcuup(vit_tokens, 14, 14)  # (B, 512, 28, 28)
         
+        cnn_features = F.normalize(cnn_features, dim=1)
+        vit_features = F.normalize(vit_features, dim=1)
         # Cross-attention fusion
         fusion_1 = self.nl_block(cnn_features, vit_features)  # CNN query, ViT key/value
         fusion_2 = self.nl_block(vit_features, cnn_features)  # ViT query, CNN key/value

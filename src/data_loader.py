@@ -38,7 +38,6 @@ class BreastDCE_Dataset(Dataset):
         # Load (H,W,9)
         data = np.load(path).astype(np.float32)
         data = data.transpose(2, 0, 1)  # (9,H,W)
-        data = data - data[0:1, :, :]   
 
         # Normalize per-case
         mean = data.mean()
@@ -63,8 +62,6 @@ class BreastDCE_Dataset(Dataset):
             data = data[:, 16:240, 16:240]
 
         # Clamp & scale to [0,1]
-        data = torch.clamp(data, -3, 3)
-        data = (data + 3) / 6
 
         return data, label
 
