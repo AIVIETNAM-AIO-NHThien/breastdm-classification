@@ -17,10 +17,10 @@ EPOCHS = 100
 EARLY_STOPPING_PATIENCE = 30  # số epoch không cải thiện thì dừng
 
 # ==================== HYPERPARAMETERS ====================
-OPTIMIZER = "AdamW"           # "AdamW" hoặc "SGD"
+OPTIMIZER = "SGD"           # "AdamW" hoặc "SGD"
 LR = 0.01
 WEIGHT_DECAY = 0.01
-MOMENTUM = 0.9 if OPTIMIZER == "SGD" else None
+MOMENTUM = 0.9 
 
 # Learning rate scheduler
 SCHEDULER = "ReduceLROnPlateau"   # "ReduceLROnPlateau" hoặc "CosineAnnealing"
