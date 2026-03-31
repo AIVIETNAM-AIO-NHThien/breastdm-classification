@@ -17,9 +17,9 @@ EPOCHS = 100
 EARLY_STOPPING_PATIENCE = 30  # số epoch không cải thiện thì dừng
 
 # ==================== HYPERPARAMETERS ====================
-OPTIMIZER = "SGD"           # "AdamW" hoặc "SGD"
-LR = 0.005
-WEIGHT_DECAY = 0.001
+OPTIMIZER = "AdamW"
+LR = 3e-5
+WEIGHT_DECAY = 1e-4
 MOMENTUM = 0.9 
 
 # Learning rate scheduler
@@ -28,8 +28,8 @@ SCHEDULER_PATIENCE = 5
 SCHEDULER_FACTOR = 0.5
 
 # Regularization (dropout)
-DROPOUT = 0.1
-ATTN_DROPOUT = 0.1
+DROPOUT = 0.2
+ATTN_DROPOUT = 0.2
 
 # ==================== CLASS WEIGHTS ====================
 # Nếu muốn tính từ loader, để None; nếu muốn set tay, gán giá trị
