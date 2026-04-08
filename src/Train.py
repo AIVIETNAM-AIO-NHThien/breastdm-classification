@@ -186,16 +186,16 @@ if __name__ == '__main__':
         if early_stopping.early_stop:
             print('Early stopping triggered')
             break
-    
     print('\n========== Final evaluation on test set ==========')
     best_model_path = 'model/{}/{}_best.pth'.format(arg.task_name, arg.model)
     if os.path.exists(best_model_path):
         state_dict = torch.load(best_model_path)
-        model.module.load_state_dict(state_dict)
+    # Load trực tiếp vào model đã được DataParallel (tự động xử lý prefix 'module.')
+        model.load_state_dict(state_dict)
         print('Loaded best model from {}'.format(best_model_path))
     else:
         print('Warning: best model not found, using last model')
-    
+
     test_acc, test_loss, test_auc = evaluate(test_loader, 'Test')
     print('\n===== Exp-1 Final Results =====')
     print('Test Accuracy: {:.2f}%'.format(test_acc))
