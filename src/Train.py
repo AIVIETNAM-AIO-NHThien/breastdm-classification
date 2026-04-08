@@ -24,6 +24,13 @@ import matplotlib.pyplot as plt
 import fusionModels
 from tools import EarlyStopping
 
+# ========== THÊM HÀM youden ==========
+def youden(tpr, fpr, thresholds):
+    J = tpr - fpr
+    idx = np.argmax(J)
+    return idx, thresholds[idx]
+# =====================================
+
 parser = argparse.ArgumentParser()
 parser.add_argument('--batch-size', type=int, default=32, help='batch size')
 parser.add_argument('--model', type=str, default='resnet50', help='coco.data file path')
@@ -34,7 +41,6 @@ parser.add_argument('--split_train_ratio', type=float, default=0.8, help='coco.d
 parser.add_argument('--task_name', type=str, default='breast-cancer-dataset', help='coco.data file path')
 parser.add_argument('--path', type=str, default=r'E:\Data', help='coco.data file path')
 parser.add_argument('--auto_split', type=str, default='0', help='coco.data file path')
-
 
 arg = parser.parse_args()
 os.environ["CUDA_VISIBLE_DEVICES"] = arg.gpu
@@ -51,11 +57,9 @@ random_seed = int(arg.random_seed)
 split_train_ratio = arg.split_train_ratio
 path = arg.path
 
+# Sửa source_name và target_name cho phù hợp
 source_name = "train"
-target_name = "test"
-
-
-# test_name = 'test'
+target_name = "test"   # sẽ load từ thư mục test sau khi chia 70/10/20
 
 cuda = not no_cuda and torch.cuda.is_available()
 
@@ -65,65 +69,63 @@ if cuda:
 
 kwargs = {'num_workers': 4, 'pin_memory': True} if cuda else {}
 
-
 def split_data():
-    for name in [source_name, target_name]:
-        if os.path.exists(os.path.join(path, name)):
-            rmtree(os.path.join(path, name))
-            os.makedirs(os.path.join(path, name))
-        else:
-            os.makedirs(os.path.join(path, name))  ##创建train文件夹和validation文件夹
-
-    tmp = os.listdir(path)  ##列出path路径下的所有文件夹
-
-    tmp = [i for i in tmp if i not in [source_name, target_name]]
-    for properties in tmp:
-        files = os.listdir(os.path.join(path, properties))  ##列出path/properties下的文件 也就是images
-        random.seed(random_seed)  ##随机种子
-        random.shuffle(files)  ##依据随机种子进行images的打乱
-        for file in files[: int(len(files) * split_train_ratio)]:  ##从第1张images到80%的len的images分为trainset
-            if not os.path.exists(os.path.join(path, 'train', properties)):
-                os.makedirs(os.path.join(path, 'train', properties))
-            copyfile(os.path.join(path, properties, file),
-                     os.path.join(path, 'train', properties, file)
-                     )  ## 将properties中的80%转到train文件夹下
-        for file in files[int(len(files) * split_train_ratio):]:
-            if not os.path.exists(os.path.join(path, 'val', properties)):
-                os.makedirs(os.path.join(path, 'val', properties))
-            copyfile(os.path.join(path, properties, file),
-                     os.path.join(path, 'val', properties, file)
-                     )  ## 将properties中的20%转到val文件夹下
-    print('complete data split')
-
+    # Xóa các thư mục cũ nếu có
+    for name in ['train', 'val', 'test']:
+        dir_path = os.path.join(path, name)
+        if os.path.exists(dir_path):
+            rmtree(dir_path)
+        os.makedirs(dir_path)
+    
+    # Lấy danh sách các thư mục con (B, M, ...) - mỗi thư mục là một class
+    items = [i for i in os.listdir(path) if i not in ['train', 'val', 'test']]
+    
+    for class_name in items:
+        class_path = os.path.join(path, class_name)
+        if not os.path.isdir(class_path):
+            continue
+        files = [f for f in os.listdir(class_path) if os.path.isfile(os.path.join(class_path, f))]
+        random.seed(random_seed)
+        random.shuffle(files)
+        
+        total = len(files)
+        train_cnt = int(total * 0.7)
+        val_cnt = int(total * 0.1)
+        # test_cnt còn lại = total - train_cnt - val_cnt
+        
+        train_files = files[:train_cnt]
+        val_files = files[train_cnt:train_cnt+val_cnt]
+        test_files = files[train_cnt+val_cnt:]
+        
+        # Copy vào các thư mục đích
+        for subset, subset_files in zip(['train', 'val', 'test'], [train_files, val_files, test_files]):
+            dest_dir = os.path.join(path, subset, class_name)
+            if not os.path.exists(dest_dir):
+                os.makedirs(dest_dir)
+            for f in subset_files:
+                copyfile(os.path.join(class_path, f), os.path.join(dest_dir, f))
+    print('Complete data split into train/val/test with ratio 70/10/20')
 
 if arg.auto_split == '1':
     split_data()
 else:
     pass
 
-num_classes = len(os.listdir(os.path.join(path, source_name)))  ##类别数
-source_loader = data_loader.load_training(path, source_name, batch_size, kwargs)  ##训练数据获取并进行处理
-target_val_loader, names, label = data_loader.load_testing(path, target_name, batch_size, kwargs)  ##验证数据获取去并进行处理
-# target_test_loader, t_names, t_label = data_loader.load_testing(path,test_name,batch_size,kwargs)
+# Sau khi split, đếm số class dựa trên thư mục train (hoặc test)
+num_classes = len(os.listdir(os.path.join(path, source_name)))  # thư mục train chứa các class (B, M)
+
+source_loader = data_loader.load_training(path, source_name, batch_size, kwargs)
+# Load validation từ thư mục test (theo đúng ý đồ của tác giả, test đóng vai trò validation)
+target_val_loader, names, label = data_loader.load_testing(path, target_name, batch_size, kwargs)
 
 len_source_dataset = len(source_loader.dataset)
 len_target_dataset = len(target_val_loader.dataset)
-# len_test_dataset = len(target_test_loader.dataset)
-len_source_loader = len(source_loader)
-
-
-
 
 def save_dict(model):
-    dict = model.module.state_dict() if type(
-        model) is nn.parallel.DistributedDataParallel else model.state_dict()
+    dict = model.module.state_dict() if type(model) is nn.parallel.DistributedDataParallel else model.state_dict()
     if not os.path.exists('model/{}'.format(arg.task_name)):
         os.makedirs('model/{}'.format(arg.task_name))
     torch.save(dict, 'model/{}/{}.pth'.format(arg.task_name, arg.model))
-
-
-
-
 
 def plot_confusion_matrix(cm, savename, title='Confusion Matrix'):
     classes = ['benign', 'malignant']
@@ -131,7 +133,6 @@ def plot_confusion_matrix(cm, savename, title='Confusion Matrix'):
     plt.figure(figsize=(12, 12), dpi=100)
     np.set_printoptions(precision=2)
 
-    # 在混淆矩阵中每格的概率值
     ind_array = np.arange(len(classes))
     x, y = np.meshgrid(ind_array, ind_array)
     for x_val, y_val in zip(x.flatten(), y.flatten()):
@@ -148,7 +149,6 @@ def plot_confusion_matrix(cm, savename, title='Confusion Matrix'):
     plt.ylabel('Actual label')
     plt.xlabel('Predict label')
 
-    # offset the tick
     tick_marks = np.array(range(len(classes))) + 0.5
     plt.gca().set_xticks(tick_marks, minor=True)
     plt.gca().set_yticks(tick_marks, minor=True)
@@ -157,18 +157,15 @@ def plot_confusion_matrix(cm, savename, title='Confusion Matrix'):
     plt.grid(True, which='minor', linestyle='-')
     plt.gcf().subplots_adjust(bottom=0.15)
 
-    # show confusion matrix
     plt.savefig(savename, format='png')
     plt.show()
-
 
 def train(epoch, model):
     LEARNING_RATE = max(lr * (0.1 ** (epoch // 10)), 1e-5)
 
-
     optimizer = torch.optim.SGD([
         {'params': model.parameters()}
-    ], lr=LEARNING_RATE,momentum=momentum,weight_decay=l2_decay)
+    ], lr=LEARNING_RATE, momentum=momentum, weight_decay=l2_decay)
 
     model.train()
     correct = 0
@@ -183,10 +180,8 @@ def train(epoch, model):
         optimizer.step()
         pred = pred.data.max(1)[1]
         correct += pred.eq(label.data.view_as(pred)).cpu().sum()
-        print('Train Epoch: {} loss :{} learning_rate:{}\n'.format(epoch, loss.item(),LEARNING_RATE))
+        print('Train Epoch: {} loss :{} learning_rate:{}\n'.format(epoch, loss.item(), LEARNING_RATE))
     print(f'train accuracy: {100. * correct / len_source_dataset}%')
-
-
 
 def val(model):
     model.eval()
@@ -194,40 +189,37 @@ def val(model):
     correct = 0
     possbilitys = None
     pred_all = []
+    all_targets = []  # lưu target để tính confusion matrix
     for data, target in target_val_loader:
         if cuda:
             data, target = data.cuda(), target.cuda()
 
         s_output = model(data)
-        test_loss += F.nll_loss(F.log_softmax(s_output, dim=1), target, reduction='sum').item()  # sum up batch loss
-        pred = s_output.data.max(1)[1]  # get the index of the max utils-probability
+        test_loss += F.nll_loss(F.log_softmax(s_output, dim=1), target, reduction='sum').item()
+        pred = s_output.data.max(1)[1]
         pred_all.append(pred.cpu().numpy())
+        all_targets.append(target.cpu().numpy())
         possbility = F.softmax(s_output, dim=1).cpu().data.numpy()
         if possbilitys is None:
             possbilitys = possbility
         else:
             possbilitys = np.append(possbilitys, possbility, axis=0)
         correct += pred.eq(target.data.view_as(pred)).cpu().sum()
-    pred_all =  [i for item in pred_all for i in item]
-    cm = metrics.confusion_matrix(label,pred_all)
-    # plot_confusion_matrix(cm,savename='./png/test2.png')
-    label_onehot = np.eye(num_classes)[np.array(label).astype(np.int32).tolist()]
+    pred_all = [i for item in pred_all for i in item]
+    all_targets = [i for item in all_targets for i in item]
+    cm = metrics.confusion_matrix(all_targets, pred_all)
+    label_onehot = np.eye(num_classes)[np.array(all_targets).astype(np.int32).tolist()]
     fpr, tpr, thresholds = roc_curve(label_onehot.ravel(), possbilitys.ravel())
     index, optimal_threshold = youden(tpr, fpr, thresholds)
     auc_value = auc(fpr, tpr)
     test_loss /= len_target_dataset
-    # print('FPR:',fpr)
-    # print('TPR:',tpr)
-    # print('index',index)
-
 
     print('Specific:{} sensitivity:{} Auc:{}'.format(1 - fpr[index], tpr[index], auc_value))
     print('\n{} set: Average loss: {:.4f}, Accuracy: {}/{} ({:.2f}%)\n'.format(
         target_name, test_loss, correct, len_target_dataset,
         100. * correct / len_target_dataset))
 
-    return 100. * correct / len_target_dataset,test_loss,auc_value
-
+    return 100. * correct / len_target_dataset, test_loss, auc_value
 
 def test(model):
     model.eval()
@@ -236,14 +228,16 @@ def test(model):
     possbilitys = None
     label_names = ['benign', 'malignant']
     pred_all = []
+    all_targets = []
     for data, target in target_val_loader:
         if cuda:
             data, target = data.cuda(), target.cuda()
 
         s_output = model(data)
-        test_loss += F.nll_loss(F.log_softmax(s_output, dim=1), target, reduction='sum').item()  # sum up batch loss
-        pred = s_output.data.max(1)[1]  # get the index of the max utils-probability
+        test_loss += F.nll_loss(F.log_softmax(s_output, dim=1), target, reduction='sum').item()
+        pred = s_output.data.max(1)[1]
         pred_all.append(pred.cpu().numpy())
+        all_targets.append(target.cpu().numpy())
         possbility = F.softmax(s_output, dim=1).cpu().data.numpy()
         if possbilitys is None:
             possbilitys = possbility
@@ -251,31 +245,20 @@ def test(model):
             possbilitys = np.append(possbilitys, possbility, axis=0)
         correct += pred.eq(target.data.view_as(pred)).cpu().sum()
     pred_all = [i for item in pred_all for i in item]
-    print(metrics.classification_report(label, pred_all, labels=range(2), target_names=label_names,digits=4))
-    cm = metrics.confusion_matrix(label, pred_all, labels=range(2))
+    all_targets = [i for item in all_targets for i in item]
+    print(metrics.classification_report(all_targets, pred_all, labels=range(2), target_names=label_names, digits=4))
+    cm = metrics.confusion_matrix(all_targets, pred_all, labels=range(2))
     print(cm)
-    # plot_confusion_matrix(cm, savename='./png/resnet101.png')
-    label_onehot = np.eye(num_classes)[np.array(label).astype(np.int32).tolist()]
+    label_onehot = np.eye(num_classes)[np.array(all_targets).astype(np.int32).tolist()]
     fpr, tpr, thresholds = roc_curve(label_onehot.ravel(), possbilitys.ravel())
     index, optimal_threshold = youden(tpr, fpr, thresholds)
     auc_value = auc(fpr, tpr)
-    # auc_2 = roc_auc_score(label,possbilitys.ravel())
-    # print(auc_2)
-    # draw_auc(fpr,tpr,auc_value,'./se1_auc.jpg')
     test_loss /= len_target_dataset
-    # print('FPR:',fpr)
-    # print('TPR:',tpr)
-    # print('index',index)
-    # a =  np.mat(pred_all).reshape(-1, 17)
-    # print(f'{a} \n')
     print('Specific:{} sensitivity:{} Auc:{}'.format(1 - fpr[index], tpr[index], auc_value))
-    # print('auc2:',auc_2)
     print('\n{} set: Average loss: {:.4f}, Accuracy: {}/{} ({:.2f}%)\n'.format(
         target_name, test_loss, correct, len_target_dataset,
         100. * correct / len_target_dataset))
-
     return 100. * correct / len_target_dataset
-
 
 if __name__ == '__main__':
     if arg.model == 'resnet101':
@@ -301,40 +284,25 @@ if __name__ == '__main__':
     if arg.model == 'resnet152':
         model = Models.Resnet152(num_classes=num_classes)
     if arg.model == 'fusion':
-        model = fusionModels.FusionM(num_classes=num_classes,load_vit=True)
-    correct = 0
-    # model.conv1 = nn.Conv2d(1,64,kernel_size=7,stride=2,padding=3,bias=False)
-    # in_channel = model.fc.in_features
-    # model.fc = nn.Linear(in_channel,2)
-    # model_path = r'./model/resnet50-19c8e357.pth'
-    # assert os.path.exists(model_path), "file {} does not exist.".format(model_path)
-    # pre_state_dict = torch.load(model_path)
-    # new_state_dict = {}
-    # for k,v in model.state_dict().items():
-    #     if k in pre_state_dict.keys() and k!='conv1.weight' and k not in ['fc.weight','fc.bias']:
-    #         new_state_dict[k] = pre_state_dict[k]
-    # model.load_state_dict(new_state_dict,False)
+        model = fusionModels.FusionM(num_classes=num_classes, load_vit=True)
 
     print(model)
-
-
 
     model = torch.nn.DataParallel(model, device_ids=list(range(len(arg.gpu.split(',')))))
     model.cuda()
     best_acc = 0
-    early_stopping = EarlyStopping(patience=20 , verbose=True)
+    early_stopping = EarlyStopping(patience=20, verbose=True)
     for epoch in range(1, epochs + 1):
         train(epoch, model)
         with torch.no_grad():
-            e_acc,test_loss,Auc = val(model)
-        dict = model.module.state_dict() if type(
-            model) is nn.parallel.DistributedDataParallel else model.state_dict()
+            e_acc, test_loss, Auc = val(model)
+        dict = model.module.state_dict() if type(model) is nn.parallel.DistributedDataParallel else model.state_dict()
         if not os.path.exists(os.path.join('model', arg.task_name)):
             os.makedirs(os.path.join('model', arg.task_name))
-        early_stopping(test_loss,model)
+        early_stopping(test_loss, model)
         if Auc > best_acc:
             best_acc = Auc
-            torch.save(dict, os.path.join('model', arg.task_name,arg.model  + str(epoch)  + '.pth', ),
+            torch.save(dict, os.path.join('model', arg.task_name, arg.model + str(epoch) + '.pth'),
                        _use_new_zipfile_serialization=False)
             print('save success')
         if early_stopping.early_stop:
