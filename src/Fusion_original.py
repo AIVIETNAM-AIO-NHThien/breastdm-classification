@@ -115,7 +115,7 @@ class NLBlockND(nn.Module):
         return z
 
 
-# ==================== PATCH EMBEDDING (HỖ TRỢ 9 CHANNELS) ====================
+# PATCH EMBEDDING (9 CHANNELS) 
 class PatchEmbed(nn.Module):
     """2D Image to Patch Embedding"""
     def __init__(self, img_size=224, patch_size=16, in_c=3, embed_dim=768, norm_layer=None):
@@ -319,9 +319,8 @@ class VisionTransformer_9ch(nn.Module):
         return x
 
 
-# ==================== SE-RESNET CHO 9 CHANNELS ====================
+# SE-RESNET CHO 9 CHANNELS 
 class SEResNet_9ch(nn.Module):
-    """SE-ResNet50 modified for 9-channel input"""
     def __init__(self):
         super().__init__()
         model_se = premodels.se_resnet50()
@@ -357,7 +356,7 @@ class SEResNet_9ch(nn.Module):
         return x
 
 
-# ==================== FCUUP (GIỮ NGUYÊN) ====================
+#FCUUP
 class FCUUp(nn.Module):
     """Transformer patch embeddings -> CNN feature maps"""
     def __init__(self, inplanes, outplanes, up_stride, act_layer=nn.ReLU,
@@ -376,7 +375,7 @@ class FCUUp(nn.Module):
         return F.interpolate(x_r, size=(H * self.up_stride, W * self.up_stride))
 
 
-# ==================== FUSION MODEL HOÀN CHỈNH ====================
+# FUSION MODEL 
 class FusionM_9ch(nn.Module):
     def __init__(self, num_classes=2, load_vit=False, vit_pretrained_path=None,
                  drop_ratio=0.0, attn_drop_ratio=0.0):
@@ -385,7 +384,7 @@ class FusionM_9ch(nn.Module):
         # CNN branch with 9 channels
         self.cnn = SEResNet_9ch()
         
-        # ViT branch with 9 channels (có thể điều chỉnh dropout)
+        # ViT branch with 9 channels 
         self.vit = VisionTransformer_9ch(
             img_size=224,
             patch_size=16,
@@ -394,8 +393,8 @@ class FusionM_9ch(nn.Module):
             embed_dim=768,
             depth=12,
             num_heads=12,
-            drop_ratio=drop_ratio,          # ← tham số từ config
-            attn_drop_ratio=attn_drop_ratio # ← tham số từ config
+            drop_ratio=drop_ratio,          
+            attn_drop_ratio=attn_drop_ratio 
         )
         
         # Non-local block
@@ -408,7 +407,7 @@ class FusionM_9ch(nn.Module):
         self.avgpool = nn.AdaptiveAvgPool2d(1)
         self.fc = nn.Linear(1024, num_classes)  # 512 + 512 = 1024
         
-        # Load pretrained ViT if specified
+        # Load pretrained ViT 
         self.load_vit = load_vit
         if load_vit and vit_pretrained_path:
             self._load_vit_pretrained(vit_pretrained_path)
@@ -475,9 +474,8 @@ class FusionM_9ch(nn.Module):
         return output
 
 
-# ==================== MAIN TEST ====================
+# MAIN TEST 
 if __name__ == '__main__':
-    # Test với 9 channels
     a = torch.rand(2, 9, 224, 224)
     
     # Khởi tạo model

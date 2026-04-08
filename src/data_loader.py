@@ -1,92 +1,53 @@
-import os
-import numpy as np
+from torchvision import datasets, transforms
 import torch
-from torch.utils.data import Dataset, DataLoader
-import torch.nn.functional as F
-import random
+import numpy as np
+import os
 
-class BreastDCE_Dataset(Dataset):
-    def __init__(self, root_path, split="train"):
-        self.root = os.path.join(root_path, split)
-        self.split = split
+norm_mean = [0.485,0.456,0.406]
+norm_std = [0.229,0.224,0.225]
+norm_mean1 = [0.485,]
+norm_std1 = [0.229,]
+def load_training(root_path, dir, batch_size, kwargs):
+    transform = transforms.Compose([
+         # transforms.Grayscale(1),
+         transforms.Resize([256,256]),##重置图像分辨率
+         # transforms.RandomRotation(15),##以指定的角度选装图片。（-15°，15°）
+         transforms.ColorJitter(),##随机修改亮度、对比度和饱和度
+         transforms.RandomCrop(224),##依据给定的size随机裁剪
+         transforms.RandomHorizontalFlip(),##以给定的概率随机水平翻折PIL图片。默认概率是0.5
+         transforms.RandomVerticalFlip(),##依据概率p对PIL图片进行垂直翻转
+         transforms.ToTensor(),#将PIL Image或者 ndarray 转换为tensor，并且归一化至[0-1]
+         transforms.Normalize(norm_mean,norm_std,inplace=True)
+         ])
+    data = datasets.ImageFolder(root=os.path.join(root_path, dir),transform=transform)##将特征与标签进行组合
+    train_loader = torch.utils.data.DataLoader(data, batch_size=batch_size, shuffle=True, drop_last=True, **kwargs)
+    return train_loader
 
-        self.samples = []
-        self.labels = []
+def load_testing(root_path, dir, batch_size, kwargs):
 
-        classes = sorted([c for c in os.listdir(self.root) 
-                          if os.path.isdir(os.path.join(self.root, c))])
 
-        for label, cls in enumerate(classes):
-            cls_path = os.path.join(self.root, cls)
 
-            for case in os.listdir(cls_path):
-                case_path = os.path.join(cls_path, case)
-                if not os.path.isdir(case_path):
-                    continue
-                for f in os.listdir(case_path):
-                    if f.endswith(".npy"):
-                        self.samples.append(os.path.join(case_path, f))
-                        self.labels.append(label)
+    transform = transforms.Compose([
+         # transforms.Grayscale(1),
+         transforms.Resize([224,224]),
+         # transforms.Resize(256),
+         # transforms.CenterCrop(224),
+         transforms.ToTensor(),
+         transforms.Normalize(norm_mean,norm_std,inplace=True)
+         ])##训练集不做数据增强操作
+    data = datasets.ImageFolder(root=os.path.join(root_path, dir),transform=transform)
+    # print(list(data.imgs))
+    names = list(map(lambda x: os.path.basename(x[0]), list(data.imgs)))#os.path.basename 返回路径最后的文件名
+    label = list(map(lambda x: x[1], list(data.imgs)))
+    # print(names, label)
+    # for name, label in data.imgs:
+    #     print(name, label)
+    test_loader = torch.utils.data.DataLoader(data, batch_size=batch_size, shuffle=False, **kwargs)
+    return test_loader, names, label
 
-    def __len__(self):
-        return len(self.samples)
 
-    def __getitem__(self, idx):
-        path = self.samples[idx]
-        label = self.labels[idx]
-
-        # Load (H,W,9)
-        data = np.load(path).astype(np.float32)
-        data = data.transpose(2, 0, 1)  # (9,H,W)
-
-        # Normalize per-case
-        mean = data.mean()
-        std = data.std() + 1e-6
-        data = (data - mean) / std
-
-        data = torch.from_numpy(data)  # (9,H,W)
-        data = data.unsqueeze(0)       # (1,9,H,W)
-        data = F.interpolate(data, size=(256,256), mode='bilinear', align_corners=False)
-        data = data.squeeze(0)         # (9,256,256)
-
-        # Data augmentation
-        if self.split == "train":
-            i = random.randint(0, 256-224)
-            j = random.randint(0, 256-224)
-            data = data[:, i:i+224, j:j+224]
-            if random.random() > 0.5:
-                data = torch.flip(data, dims=[2])
-            if random.random() > 0.5:
-                data = torch.flip(data, dims=[1])
-        else:
-            data = data[:, 16:240, 16:240]
-
-        # Clamp & scale to [0,1]
-
-        return data, label
-
-def build_dataloader(root_path, split, batch_size, num_workers=2):
-    dataset = BreastDCE_Dataset(root_path, split)
-    loader = DataLoader(dataset,
-                        batch_size=batch_size,
-                        shuffle=(split=="train"),
-                        num_workers=num_workers,
-                        pin_memory=True,
-                        drop_last=(split=="train"))
-    return loader
-
-def get_dataloaders(root_path, batch_size, num_workers=2):
-    train_loader = build_dataloader(root_path, "train", batch_size, num_workers)
-    val_loader   = build_dataloader(root_path, "val", batch_size, num_workers)
-    test_loader  = build_dataloader(root_path, "test", batch_size, num_workers)
-    return train_loader, val_loader, test_loader
-
-if __name__ == "__main__":
-    root = "/kaggle/input/breastdm/cls/img9Se"
-    train_loader, val_loader, test_loader = get_dataloaders(root, batch_size=4)
-    print("Train size:", len(train_loader.dataset))
-    for x, y in train_loader:
-        print("Batch shape:", x.shape)
-        print("Min/Max:", x.min().item(), x.max().item())
-        print("Labels:", y)
-        break
+if __name__ == '__main__':
+    train_loader= load_training('data','train',batch_size=64,kwargs={})
+    i=0
+    for data,label in train_loader:
+       print(data.shape)
