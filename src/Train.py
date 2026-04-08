@@ -29,7 +29,6 @@ parser.add_argument('--model', type=str, default='resnet50')
 parser.add_argument('--gpu', type=str, default='0')
 parser.add_argument('--num_class', type=int, default=2)
 parser.add_argument('--random_seed', type=int, default=1)
-parser.add_argument('--split_train_ratio', type=float, default=0.8)  # không dùng nữa, thay bằng tỷ lệ cứng 70/10/20
 parser.add_argument('--task_name', type=str, default='breast-cancer-dataset')
 parser.add_argument('--path', type=str, default=r'E:\Data')
 parser.add_argument('--auto_split', type=str, default='0')
@@ -56,14 +55,12 @@ kwargs = {'num_workers': 4, 'pin_memory': True} if cuda else {}
 
 def split_data():
     """Chia dữ liệu từ thư mục B, M thành train (70%), val (10%), test (20%)"""
-    # Xóa các thư mục cũ nếu có
     for name in ['train', 'val', 'test']:
         dir_path = os.path.join(path, name)
         if os.path.exists(dir_path):
             rmtree(dir_path)
         os.makedirs(dir_path)
     
-    # Lấy các thư mục class (B, M, ...)
     items = [i for i in os.listdir(path) if i not in ['train', 'val', 'test']]
     for class_name in items:
         class_path = os.path.join(path, class_name)
@@ -75,7 +72,6 @@ def split_data():
         total = len(files)
         train_cnt = int(total * 0.7)
         val_cnt = int(total * 0.1)
-        # test_cnt = total - train_cnt - val_cnt
         
         train_files = files[:train_cnt]
         val_files = files[train_cnt:train_cnt+val_cnt]
@@ -92,10 +88,9 @@ def split_data():
 if arg.auto_split == '1':
     split_data()
 
-# Load dữ liệu
-num_classes = len(os.listdir(os.path.join(path, 'train')))  # class B, M
+num_classes = len(os.listdir(os.path.join(path, 'train')))
 train_loader = data_loader.load_training(path, 'train', batch_size, kwargs)
-val_loader, val_names, val_labels = data_loader.load_testing(path, 'val', batch_size, kwargs)
+val_loader, _, _ = data_loader.load_testing(path, 'val', batch_size, kwargs)
 test_loader, test_names, test_labels = data_loader.load_testing(path, 'test', batch_size, kwargs)
 
 len_train = len(train_loader.dataset)
@@ -103,13 +98,13 @@ len_val = len(val_loader.dataset)
 len_test = len(test_loader.dataset)
 
 def save_dict(model, epoch, is_best=False):
-    dict = model.module.state_dict() if type(model) is nn.parallel.DistributedDataParallel else model.state_dict()
+    dict_state = model.module.state_dict() if type(model) is nn.parallel.DistributedDataParallel else model.state_dict()
     if not os.path.exists('model/{}'.format(arg.task_name)):
         os.makedirs('model/{}'.format(arg.task_name))
     if is_best:
-        torch.save(dict, 'model/{}/{}_best.pth'.format(arg.task_name, arg.model))
+        torch.save(dict_state, 'model/{}/{}_best.pth'.format(arg.task_name, arg.model))
     else:
-        torch.save(dict, 'model/{}/{}_{}.pth'.format(arg.task_name, arg.model, epoch))
+        torch.save(dict_state, 'model/{}/{}_{}.pth'.format(arg.task_name, arg.model, epoch))
 
 def train(epoch, model):
     LEARNING_RATE = max(lr * (0.1 ** (epoch // 10)), 1e-5)
@@ -125,35 +120,32 @@ def train(epoch, model):
         optimizer.step()
         pred = pred.data.max(1)[1]
         correct += pred.eq(label.data.view_as(pred)).cpu().sum()
-        print('Train Epoch: {} loss: {:.4f} lr: {:.6f}'.format(epoch, loss.item(), LEARNING_RATE))
-    print('Train accuracy: {:.2f}%'.format(100. * correct / len_train))
+        # In loss mỗi batch (tùy chọn, có thể bớt để tránh spam)
+        # print('Train Epoch: {} loss: {:.4f} lr: {:.6f}'.format(epoch, loss.item(), LEARNING_RATE))
+    print('Train Epoch: {} accuracy: {:.2f}% lr: {:.6f}'.format(epoch, 100. * correct / len_train, LEARNING_RATE))
 
 def evaluate(loader, name):
-    """Hàm đánh giá chung cho val và test"""
     model.eval()
-    loss = 0
+    total_loss = 0
     correct = 0
-    prob_all = []
-    pred_all = []
+    prob_all = None
     target_all = []
     with torch.no_grad():
         for data, target in loader:
             data, target = data.float().cuda(), target.long().cuda()
             output = model(data)
-            loss += F.nll_loss(F.log_softmax(output, dim=1), target, reduction='sum').item()
+            total_loss += F.nll_loss(F.log_softmax(output, dim=1), target, reduction='sum').item()
             pred = output.data.max(1)[1]
-            pred_all.extend(pred.cpu().numpy())
             target_all.extend(target.cpu().numpy())
             prob = F.softmax(output, dim=1).cpu().data.numpy()
-            if prob_all == []:
+            if prob_all is None:
                 prob_all = prob
             else:
                 prob_all = np.append(prob_all, prob, axis=0)
             correct += pred.eq(target.data.view_as(pred)).cpu().sum()
-    loss /= len(loader.dataset)
+    total_loss /= len(loader.dataset)
     acc = 100. * correct / len(loader.dataset)
     
-    # Tính AUC và Youden
     target_onehot = np.eye(num_classes)[np.array(target_all).astype(np.int32).tolist()]
     fpr, tpr, thresholds = roc_curve(target_onehot.ravel(), prob_all.ravel())
     idx, _ = youden(tpr, fpr, thresholds)
@@ -162,18 +154,16 @@ def evaluate(loader, name):
     sensitivity = tpr[idx]
     
     print('{} set: Loss: {:.4f}, Accuracy: {:.2f}%, AUC: {:.4f}, Specificity: {:.4f}, Sensitivity: {:.4f}'.format(
-        name, loss, acc, auc_value, specificity, sensitivity))
-    return acc, loss, auc_value
+        name, total_loss, acc, auc_value, specificity, sensitivity))
+    return acc, total_loss, auc_value
 
 if __name__ == '__main__':
-    # Khởi tạo model
     if arg.model == 'fusion':
         model = fusionModels.FusionM(num_classes=num_classes, load_vit=True)
     elif arg.model == 'senet50':
         model = Models.Senet50(num_classes=num_classes)
     elif arg.model == 'resnet50':
         model = Models.Resnet50(num_classes=num_classes)
-    # ... thêm các model khác nếu cần
     else:
         raise ValueError(f"Model {arg.model} not supported")
     
@@ -181,17 +171,14 @@ if __name__ == '__main__':
     model.cuda()
     
     early_stopping = EarlyStopping(patience=20, verbose=True)
-    best_val_acc = 0
     best_val_auc = 0
     
     for epoch in range(1, epochs + 1):
         train(epoch, model)
         val_acc, val_loss, val_auc = evaluate(val_loader, 'Validation')
         
-        # Lưu model tốt nhất theo AUC
         if val_auc > best_val_auc:
             best_val_auc = val_auc
-            best_val_acc = val_acc
             save_dict(model, epoch, is_best=True)
             print('*** Best model saved (val AUC: {:.4f}) ***'.format(best_val_auc))
         
@@ -200,9 +187,7 @@ if __name__ == '__main__':
             print('Early stopping triggered')
             break
     
-    # Sau khi training xong, đánh giá trên tập test
     print('\n========== Final evaluation on test set ==========')
-    # Load model tốt nhất
     best_model_path = 'model/{}/{}_best.pth'.format(arg.task_name, arg.model)
     if os.path.exists(best_model_path):
         state_dict = torch.load(best_model_path)
