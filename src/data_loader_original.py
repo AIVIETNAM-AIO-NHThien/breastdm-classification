@@ -120,7 +120,18 @@ class BreastDMDataset(Dataset):
         # Stack theo chiều kênh -> (C, H, W)
         img_stack = torch.cat(channels, dim=0)  # (num_channels, H, W)
         return img_stack
-
+    def _augment(self, img: torch.Tensor) -> torch.Tensor:
+        # Random crop + resize để mô phỏng scaling
+        img = TF.resized_crop(img, 0, 0, img.shape[1], img.shape[2],
+                            [96, 96], scale=(0.8, 1.0), ratio=(1.0, 1.0))
+        if torch.rand(1) > 0.5:
+            img = TF.hflip(img)
+        if torch.rand(1) > 0.5:
+            img = TF.vflip(img)
+        angle = torch.randint(0, 4, (1,)).item() * 90
+        if angle != 0:
+            img = TF.rotate(img, angle, fill=0.0)
+        return img
     def _intensity_normalize(self, tensor: torch.Tensor) -> torch.Tensor:
         """
         Chuẩn hóa cường độ: clip 0.1% đuôi, sau đó z-score trên các voxel còn lại.
@@ -228,7 +239,6 @@ def create_dataloaders(
     )
 
     return train_loader, val_loader, test_loader
-
 
 # Ví dụ sử dụng
 if __name__ == "__main__":
