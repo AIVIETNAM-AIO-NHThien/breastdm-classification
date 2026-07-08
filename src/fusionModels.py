@@ -222,37 +222,27 @@ class FusionM(nn.Module):
             img_size=96, patch_size=16, in_c=in_c,
             num_classes=num_classes, depth=7
         )
-
         if self.load_vit_flag:
             self._load_pretrained_vit()
 
         # ----- CNN branch (SE‑ResNet50) -----
-        # Sử dụng timm thay vì pretrainedmodels để tránh lỗi tải file khi offline/Kaggle
-        ssl._create_default_https_context = ssl._create_unverified_context  # phòng trường hợp cần
-
-        # Load SE‑ResNet50 pretrained từ timm (tự động tải từ Hugging Face nếu chưa có)
+        import ssl
+        ssl._create_default_https_context = ssl._create_unverified_context
         se_resnet = timm.create_model('seresnet50', pretrained=True)
 
-        # Tách các stage tương đương với pretrainedmodels:
-        # - layer0 (pretrainedmodels): conv1 + bn1 + act1 + maxpool + 3 SE blocks (stride 4, 256ch)
-        # - layer1 (pretrainedmodels): 4 SE blocks (stride 8, 512ch)
-        # - layer2 (pretrainedmodels): 6 SE blocks (stride 16, 1024ch)
-        # Trong timm:
-        #   conv1, bn1, act1, maxpool, layer1 (3 blocks) -> layer0
-        #   layer2 (4 blocks) -> layer1
-        #   layer3 (6 blocks) -> layer2
-        self.layer0 = nn.Sequential(
+        # Tạo stage0: conv1 + bn1 + act1 + maxpool + layer1 (3 block, stride 4, 256c)
+        self.cnn_stage0 = nn.Sequential(
             se_resnet.conv1,
             se_resnet.bn1,
             se_resnet.act1,
             se_resnet.maxpool,
             se_resnet.layer1
         )
-        self.layer1 = se_resnet.layer2
-        self.layer2 = se_resnet.layer3
+        # Stage1: layer2 (4 block, stride 8, 512c) – đây chính là đầu ra ta cần
+        self.cnn_stage1 = se_resnet.layer2
 
-        # Thay thế conv1 đầu tiên để phù hợp với số kênh đầu vào (in_c)
-        old_conv = self.layer0[0]  # conv1 gốc (3 kênh)
+        # Thay conv1 để nhận đúng số kênh đầu vào
+        old_conv = self.cnn_stage0[0]  # conv1 gốc (3 kênh)
         new_conv = nn.Conv2d(
             in_c, old_conv.out_channels,
             kernel_size=old_conv.kernel_size,
@@ -261,9 +251,9 @@ class FusionM(nn.Module):
             bias=False
         )
         nn.init.kaiming_normal_(new_conv.weight, mode="fan_out")
-        self.layer0[0] = new_conv
+        self.cnn_stage0[0] = new_conv
 
-        # ----- Cross‑attention và fusion -----
+        # ----- Fusion -----
         self.Nlblock = NLBlockND(in_channels=512)
         self.fcuup = FCUUp(inplanes=768, outplanes=512, up_stride=2)
 
@@ -271,7 +261,6 @@ class FusionM(nn.Module):
         self.avgpool = nn.AdaptiveAvgPool2d(1)
         self.fc = nn.Linear(1024, num_classes)
 
-        # Khởi tạo các layer mới thêm (FCU, NLBlock, FC)
         self._init_new_layers()
 
     def _init_new_layers(self):
@@ -279,19 +268,18 @@ class FusionM(nn.Module):
             m.apply(_init_vit_weights)
 
     def _load_pretrained_vit(self):
-        """Xử lý load pretrained ViT: nội suy pos_embed và mở rộng kênh nếu cần."""
+        """Load pretrained ViT, xử lý khác biệt shape và chỉ lấy 7 block đầu."""
         try:
             if not os.path.exists(self.path):
                 print(f"⚠️  Pretrained ViT not found at {self.path}")
                 return
 
             state_dict = torch.load(self.path, map_location='cpu')
-
-            # Xóa head không cần thiết
+            # Xoá head không cần
             for k in ['head.weight', 'head.bias', 'head_dist.weight', 'head_dist.bias']:
                 state_dict.pop(k, None)
 
-            # --- Xử lý pos_embed ---
+            # --- Xử lý pos_embed (nội suy 197 -> 37) ---
             if 'pos_embed' in state_dict:
                 pretrained_pos = state_dict['pos_embed']          # [1, 197, 768]
                 current_pos = self.vit.pos_embed                  # [1, 37, 768]
@@ -301,29 +289,28 @@ class FusionM(nn.Module):
                     patches = pretrained_pos[:, 1:, :]            # [1, 196, 768]
                     grid_size = int(patches.shape[1] ** 0.5)      # 14
                     new_grid = int((current_pos.shape[1] - 1) ** 0.5)  # 6
-
                     patches = patches.reshape(1, grid_size, grid_size, -1).permute(0, 3, 1, 2)
                     patches = F.interpolate(patches, size=(new_grid, new_grid), mode='bicubic')
                     patches = patches.permute(0, 2, 3, 1).reshape(1, new_grid * new_grid, -1)
-
                     state_dict['pos_embed'] = torch.cat([cls_token, patches], dim=1)
 
-            # --- Xử lý patch_embed.proj.weight ---
+            # --- Xử lý patch_embed (mở rộng 3 -> 17/9 kênh) ---
             if 'patch_embed.proj.weight' in state_dict:
                 old_weight = state_dict['patch_embed.proj.weight']   # [768, 3, 16, 16]
-                new_channels = self.vit.patch_embed.proj.weight.shape[1]  # 9 hoặc 17
+                new_channels = self.vit.patch_embed.proj.weight.shape[1]
                 if old_weight.shape[1] != new_channels:
                     print(f"🔄 Expanding patch_embed channels: {old_weight.shape[1]} → {new_channels}")
-                    avg_weight = old_weight.mean(dim=1, keepdim=True)   # [768, 1, 16, 16]
+                    avg_weight = old_weight.mean(dim=1, keepdim=True)
                     state_dict['patch_embed.proj.weight'] = avg_weight.repeat(1, new_channels, 1, 1)
 
-            # Load với strict=True vì mọi shape đã khớp
-            missing, unexpected = self.vit.load_state_dict(state_dict, strict=True)
-            print(f"✅ Loaded pretrained ViT successfully")
+            # --- Load với strict=False để bỏ qua block 7-11 (ViT gốc 12 block, ta chỉ có 7) ---
+            missing, unexpected = self.vit.load_state_dict(state_dict, strict=False)
+            print(f"✅ Loaded pretrained ViT (first 7 blocks)")
             if missing:
                 print(f"   Missing keys (will be randomly init): {missing}")
             if unexpected:
-                print(f"   Unexpected keys (ignored): {unexpected}")
+                # Chỉ in số lượng, không cần chi tiết vì biết là các block thừa
+                print(f"   Unexpected keys (ignored): {len(unexpected)} keys from blocks 7-11")
 
         except Exception as e:
             print(f"⚠️  Error loading pretrained ViT: {e}")
@@ -336,22 +323,20 @@ class FusionM(nn.Module):
         H = W = int(num_patches ** 0.5)           # 6
         vit_feat = self.fcuup(vit_x, H, W)        # (B, 512, 12, 12)
 
-        # CNN pathway
-        cnn_feat = self.layer0(x)
-        cnn_feat = self.layer1(cnn_feat)
-        cnn_feat = self.layer2(cnn_feat)          # (B, 512, 12, 12)  (vì stride 8: 96/8=12)
+        # CNN pathway: chỉ dùng 2 stage đầu → 512 kênh
+        cnn_feat = self.cnn_stage0(x)             # (B, 256, 24, 24)
+        cnn_feat = self.cnn_stage1(cnn_feat)      # (B, 512, 12, 12)
 
-        # Cross‑attention fusion
+        # Cross‑attention
         out1 = self.Nlblock(cnn_feat, vit_feat)   # CNN query ViT
         out2 = self.Nlblock(vit_feat, cnn_feat)   # ViT query CNN
         fused = torch.cat((out1, out2), dim=1)    # (B, 1024, 12, 12)
 
-        # Classification
+        # Classifier
         pooled = self.avgpool(fused)
         pooled = pooled.view(pooled.size(0), -1)
         logits = self.fc(pooled)
         return logits
-
 
 # ======================== Test ========================
 if __name__ == '__main__':
