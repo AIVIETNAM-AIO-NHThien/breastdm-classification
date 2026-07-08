@@ -4,7 +4,7 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 from PIL import Image
 import torchvision.transforms.functional as TF
-from typing import Optional, Tuple, List
+from typing import Tuple, List
 
 
 class BreastDMDataset(Dataset):
@@ -120,18 +120,7 @@ class BreastDMDataset(Dataset):
         # Stack theo chiều kênh -> (C, H, W)
         img_stack = torch.cat(channels, dim=0)  # (num_channels, H, W)
         return img_stack
-    def _augment(self, img: torch.Tensor) -> torch.Tensor:
-        # Random crop + resize để mô phỏng scaling
-        img = TF.resized_crop(img, 0, 0, img.shape[1], img.shape[2],
-                            [96, 96], scale=(0.8, 1.0), ratio=(1.0, 1.0))
-        if torch.rand(1) > 0.5:
-            img = TF.hflip(img)
-        if torch.rand(1) > 0.5:
-            img = TF.vflip(img)
-        angle = torch.randint(0, 4, (1,)).item() * 90
-        if angle != 0:
-            img = TF.rotate(img, angle, fill=0.0)
-        return img
+
     def _intensity_normalize(self, tensor: torch.Tensor) -> torch.Tensor:
         """
         Chuẩn hóa cường độ: clip 0.1% đuôi, sau đó z-score trên các voxel còn lại.
@@ -152,17 +141,19 @@ class BreastDMDataset(Dataset):
 
     def _augment(self, img: torch.Tensor) -> torch.Tensor:
         """
-        Áp dụng augmentation: RandomFlip, RandomRotation.
+        Áp dụng augmentation: RandomFlip, RandomRotation và RandomResizedCrop (scaling).
         Toàn bộ các kênh cùng chịu chung một phép biến đổi (giữ tương quan không gian).
         """
+        # Random crop + resize để mô phỏng scaling (đúng như paper mô tả)
+        img = TF.resized_crop(img, 0, 0, img.shape[1], img.shape[2],
+                              [96, 96], scale=(0.8, 1.0), ratio=(1.0, 1.0))
         # Random horizontal flip
         if torch.rand(1) > 0.5:
             img = TF.hflip(img)
         # Random vertical flip
         if torch.rand(1) > 0.5:
             img = TF.vflip(img)
-        # Random rotation (0, 90, 180, 270) hoặc góc bất kỳ.
-        # Ở đây chọn ngẫu nhiên một trong 4 góc để giảm biến dạng lớn.
+        # Random rotation (0, 90, 180, 270)
         angle = torch.randint(0, 4, (1,)).item() * 90
         if angle != 0:
             img = TF.rotate(img, angle, fill=0.0)
@@ -177,14 +168,14 @@ class BreastDMDataset(Dataset):
         # 1. Đọc và xếp chồng kênh
         img = self._load_and_stack(patient_dir, slice_name)  # (C, H, W)
 
-        # 2. Augmentation (chỉ áp dụng trước resize để giữ chi tiết)
+        # 2. Augmentation (chỉ áp dụng cho tập train, đã bao gồm resize)
         if self.augment:
             img = self._augment(img)
 
         # 3. Chuẩn hóa cường độ
         img = self._intensity_normalize(img)
 
-        # 4. Resize về 96x96 cho phân loại
+        # 4. Resize về 96x96 (đảm bảo kích thước cho cả val/test)
         img = TF.resize(img, [96, 96], antialias=True)
 
         return img, label
@@ -239,6 +230,7 @@ def create_dataloaders(
     )
 
     return train_loader, val_loader, test_loader
+
 
 # Ví dụ sử dụng
 if __name__ == "__main__":
