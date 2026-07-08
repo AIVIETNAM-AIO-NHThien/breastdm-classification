@@ -9,7 +9,7 @@ from sklearn.metrics import accuracy_score, roc_auc_score, roc_curve, confusion_
 import sys
 
 # Import custom data loader and model
-from data_loader import create_dataloaders   # hoặc đổi tên thành get_breast_loaders nếu bạn đã định nghĩa
+from data_loader_original import create_dataloaders   # hoặc đổi tên thành get_breast_loaders nếu bạn đã định nghĩa
 from fusionModels import FusionM                          # file Fusion.py đã được chỉnh sửa
 
 # -------------------------------
