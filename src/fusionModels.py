@@ -294,14 +294,7 @@ class FusionM(nn.Module):
                     patches = patches.permute(0, 2, 3, 1).reshape(1, new_grid * new_grid, -1)
                     state_dict['pos_embed'] = torch.cat([cls_token, patches], dim=1)
 
-            # --- Xử lý patch_embed (mở rộng 3 -> 17/9 kênh) ---
-            if 'patch_embed.proj.weight' in state_dict:
-                old_weight = state_dict['patch_embed.proj.weight']   # [768, 3, 16, 16]
-                new_channels = self.vit.patch_embed.proj.weight.shape[1]
-                if old_weight.shape[1] != new_channels:
-                    print(f"🔄 Expanding patch_embed channels: {old_weight.shape[1]} → {new_channels}")
-                    avg_weight = old_weight.mean(dim=1, keepdim=True)
-                    state_dict['patch_embed.proj.weight'] = avg_weight.repeat(1, new_channels, 1, 1)
+
 
             # --- Load với strict=False để bỏ qua block 7-11 (ViT gốc 12 block, ta chỉ có 7) ---
             missing, unexpected = self.vit.load_state_dict(state_dict, strict=False)
