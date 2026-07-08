@@ -275,15 +275,15 @@ class FusionM(nn.Module):
 
         state_dict = torch.load(self.path, map_location='cpu')
 
-        # 1. Xoá head không cần thiết
+        # Xoá head không cần thiết
         for k in ['head.weight', 'head.bias', 'head_dist.weight', 'head_dist.bias']:
             state_dict.pop(k, None)
 
-        # 2. Xoá patch_embed (số kênh không khớp, sẽ dùng _init_vit_weights)
+        # Xoá patch_embed (số kênh không khớp, sẽ dùng _init_vit_weights)
         state_dict.pop('patch_embed.proj.weight', None)
         state_dict.pop('patch_embed.proj.bias', None)
 
-        # 3. Nội suy pos_embed từ 197 -> 37 tokens
+        # Nội suy pos_embed
         if 'pos_embed' in state_dict:
             pretrained_pos = state_dict['pos_embed']          # [1, 197, 768]
             current_pos = self.vit.pos_embed                  # [1, 37, 768]
@@ -298,13 +298,13 @@ class FusionM(nn.Module):
                 patches = patches.permute(0, 2, 3, 1).reshape(1, new_grid * new_grid, -1)
                 state_dict['pos_embed'] = torch.cat([cls_token, patches], dim=1)
 
-        # 4. Load với strict=True (vì mọi shape giờ đã khớp)
-        missing, unexpected = self.vit.load_state_dict(state_dict, strict=True)
+        # Load với strict=False – bỏ qua các block thừa (7‑11) và patch_embed bị thiếu
+        missing, unexpected = self.vit.load_state_dict(state_dict, strict=False)
         print(f"✅ Loaded pretrained ViT (first 7 blocks)")
         if missing:
             print(f"   Missing keys (will be randomly init): {missing}")
         if unexpected:
-            print(f"   Unexpected keys (ignored): {len(unexpected)} keys")
+            print(f"   Unexpected keys (ignored): {len(unexpected)} keys from blocks 7-11")
 
     def forward(self, x):
         # ViT pathway
