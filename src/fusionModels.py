@@ -225,6 +225,7 @@ class FusionM(nn.Module):
         self.path = r'./model/vit_base_patch16_224_in21k.pth'
 
         # ----- ViT branch -----
+        # VisionTransformer_base automatically calls _init_vit_weights inside its __init__
         self.vit = VisionTransformer_base(img_size=96, patch_size=16, in_c=in_c,
                                          num_classes=num_classes, depth=7)
 
@@ -241,7 +242,10 @@ class FusionM(nn.Module):
                              stride=old_conv.stride,
                              padding=old_conv.padding,
                              bias=False)
-        # Keep the rest of layer0 unchanged
+        # Apply kaiming init to the new conv layer
+        nn.init.kaiming_normal_(new_conv.weight, mode="fan_out")
+        
+        # Keep the rest of layer0 unchanged (with pretrained weights)
         self.layer0 = nn.Sequential(new_conv, *model_se.layer0[1:])
         self.layer1 = model_se.layer1
         self.layer2 = model_se.layer2
@@ -257,21 +261,36 @@ class FusionM(nn.Module):
         self.avgpool = nn.AdaptiveAvgPool2d(1)
         self.fc = nn.Linear(1024, num_classes)      # 512 (CNN) + 512 (ViT after FCU)
 
-        # Initialize all new layers
-        self.apply(_init_vit_weights)
+        # Initialize ONLY the new layers (ViT already initialized, CNN loaded from pretrained)
+        self._init_new_layers()
+
+    def _init_new_layers(self):
+        """Initialize only newly added layers (FCU, NLBlock, classifier)."""
+        for m in [self.fcuup, self.Nlblock, self.fc]:
+            m.apply(_init_vit_weights)
 
     def _load_pretrained_vit(self):
         """Load pretrained ViT weights, ignoring mismatched layers (e.g. head, pos_embed)."""
         try:
             state_dict = torch.load(self.path, map_location='cpu')
+            
             # Remove classification head if present
             for k in ['head.weight', 'head.bias', 'head_dist.weight', 'head_dist.bias']:
                 state_dict.pop(k, None)
-            # Load with strict=False – mismatched pos_embed will be kept as initialised
-            self.vit.load_state_dict(state_dict, strict=False)
-            print(f"Loaded pretrained ViT weights from {self.path}")
+            
+            # Load with strict=False – mismatched layers keep _init_vit_weights values
+            missing_keys, unexpected_keys = self.vit.load_state_dict(state_dict, strict=False)
+            
+            print(f"✅ Loaded pretrained ViT from {self.path}")
+            if missing_keys:
+                print(f"   Missing keys (kept from _init_vit_weights): {missing_keys}")
+            if unexpected_keys:
+                print(f"   Unexpected keys (ignored): {unexpected_keys}")
+                
         except FileNotFoundError:
-            print(f"Warning: pretrained ViT file not found at {self.path}. Training from scratch.")
+            print(f"⚠️  Pretrained ViT not found at {self.path}. Training from scratch.")
+        except Exception as e:
+            print(f"⚠️  Error loading pretrained weights: {e}. Training from scratch.")
 
     def forward(self, x):
         # ViT pathway
@@ -279,7 +298,7 @@ class FusionM(nn.Module):
         # Compute spatial dimensions from number of patches
         num_patches = vit_x.size(1) - 1             # exclude cls token
         H = W = int(num_patches ** 0.5)            # 6 for 96x96 input
-        vit_feat = self.fcuup(vit_x, H, W)          # (B, 512, H*2, W*2) -> (B,512,12,12)
+        vit_feat = self.fcuup(vit_x, H, W)          # (B, 512, 12, 12)
 
         # CNN pathway (first two stages)
         cnn_feat = self.layer0(x)
@@ -300,13 +319,21 @@ class FusionM(nn.Module):
 
 if __name__ == '__main__':
     # Quick test: 9‑channel input 96x96
+    print("Testing with 9 channels (Exp-1)...")
     dummy = torch.rand(2, 9, 96, 96)
     model = FusionM(num_classes=2, in_c=9, load_vit=False)
     out = model(dummy)
     print("Output shape:", out.shape)  # Expected: [2, 2]
 
     # Test with 17 channels
+    print("\nTesting with 17 channels (Exp-2)...")
     dummy17 = torch.rand(2, 17, 96, 96)
     model17 = FusionM(num_classes=2, in_c=17, load_vit=False)
     out17 = model17(dummy17)
-    print("17-ch output shape:", out17.shape)
+    print("Output shape:", out17.shape)  # Expected: [2, 2]
+    
+    # Test with pretrained weights
+    print("\nTesting with pretrained ViT weights...")
+    model_pretrained = FusionM(num_classes=2, in_c=17, load_vit=True)
+    out_pretrained = model_pretrained(dummy17)
+    print("Output shape:", out_pretrained.shape)  # Expected: [2, 2]
