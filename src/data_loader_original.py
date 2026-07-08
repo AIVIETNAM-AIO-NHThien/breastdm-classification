@@ -4,6 +4,7 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 from PIL import Image
 import torchvision.transforms.functional as TF
+from torchvision import transforms
 from typing import Tuple, List
 
 
@@ -22,19 +23,11 @@ class BreastDMDataset(Dataset):
         experiment: str = "Exp-1",
         augment: bool = False,
     ):
-        """
-        Args:
-            root_dir: Đường dẫn tới thư mục gốc ROI-classification
-            split: 'train', 'val', hoặc 'test'
-            experiment: 'Exp-1' hoặc 'Exp-2'
-            augment: True nếu áp dụng augmentation (chỉ dùng cho tập train)
-        """
         self.root_dir = root_dir
         self.split = split
         self.experiment = experiment
         self.augment = augment
 
-        # Xác định các thư mục con cần đọc
         if experiment == "Exp-1":
             self.folders = ["VIBRANT"] + [f"VIBRANT+C{i}" for i in range(1, 9)]
         elif experiment == "Exp-2":
@@ -42,22 +35,19 @@ class BreastDMDataset(Dataset):
         else:
             raise ValueError("Experiment phải là 'Exp-1' hoặc 'Exp-2'")
 
-        self.num_channels = len(self.folders)  # 9 hoặc 17
-
-        # Tập nhãn: Benign -> 0, Malignant -> 1
+        self.num_channels = len(self.folders)
         self.label_dict = {"Benign": 0, "Malignant": 1}
 
-        # Xây dựng danh sách mẫu
+        # Khởi tạo RandomResizedCrop cho augmentation (scaling)
+        self.random_crop = transforms.RandomResizedCrop(
+            size=96, scale=(0.8, 1.0), ratio=(1.0, 1.0)
+        )
+
         self.samples = self._build_samples()
 
     def _build_samples(self) -> List[dict]:
-        """
-        Duyệt qua cấu trúc thư mục để thu thập tất cả các lát cắt có đủ các kênh.
-        Mỗi mẫu lưu: patient_dir, slice_name, label
-        """
         samples = []
         split_dir = os.path.join(self.root_dir, self.split)
-
         if not os.path.exists(split_dir):
             raise FileNotFoundError(f"Không tìm thấy thư mục split: {split_dir}")
 
@@ -67,14 +57,13 @@ class BreastDMDataset(Dataset):
                 continue
             label = self.label_dict.get(label_name)
             if label is None:
-                continue  # bỏ qua thư mục không đúng
+                continue
 
             for patient_id in os.listdir(label_dir):
                 patient_path = os.path.join(label_dir, patient_id)
                 if not os.path.isdir(patient_path):
                     continue
 
-                # Lấy danh sách slice từ thư mục VIBRANT (đại diện)
                 vibrant_dir = os.path.join(patient_path, "VIBRANT")
                 if not os.path.exists(vibrant_dir):
                     continue
@@ -85,7 +74,6 @@ class BreastDMDataset(Dataset):
                 ]
 
                 for slice_name in slice_names:
-                    # Kiểm tra xem slice này có tồn tại trong TẤT CẢ các thư mục cần thiết không
                     valid = True
                     for folder in self.folders:
                         img_path = os.path.join(patient_path, folder, slice_name)
@@ -105,33 +93,19 @@ class BreastDMDataset(Dataset):
         return len(self.samples)
 
     def _load_and_stack(self, patient_dir: str, slice_name: str) -> torch.Tensor:
-        """
-        Đọc các ảnh cùng tên từ các thư mục khác nhau và xếp chồng thành tensor (C, H, W).
-        """
         channels = []
         for folder in self.folders:
             img_path = os.path.join(patient_dir, folder, slice_name)
-            # Đọc ảnh grayscale
             img = Image.open(img_path).convert("L")
-            # Chuyển thành tensor float (0-1)
-            img_tensor = TF.to_tensor(img)  # shape (1, H, W)
+            img_tensor = TF.to_tensor(img)  # (1, H, W)
             channels.append(img_tensor)
-
-        # Stack theo chiều kênh -> (C, H, W)
-        img_stack = torch.cat(channels, dim=0)  # (num_channels, H, W)
-        return img_stack
+        return torch.cat(channels, dim=0)  # (C, H, W)
 
     def _intensity_normalize(self, tensor: torch.Tensor) -> torch.Tensor:
-        """
-        Chuẩn hóa cường độ: clip 0.1% đuôi, sau đó z-score trên các voxel còn lại.
-        """
-        # Chuyển sang numpy để tính percentile dễ dàng
         arr = tensor.numpy()
         low = np.percentile(arr, 0.1)
         high = np.percentile(arr, 99.9)
         arr_clipped = np.clip(arr, low, high)
-
-        # Z-score trên toàn bộ mẫu
         mean = arr_clipped.mean()
         std = arr_clipped.std()
         if std == 0:
@@ -140,13 +114,9 @@ class BreastDMDataset(Dataset):
         return torch.from_numpy(arr_norm).float()
 
     def _augment(self, img: torch.Tensor) -> torch.Tensor:
-        """
-        Áp dụng augmentation: RandomFlip, RandomRotation và RandomResizedCrop (scaling).
-        Toàn bộ các kênh cùng chịu chung một phép biến đổi (giữ tương quan không gian).
-        """
-        # Random crop + resize để mô phỏng scaling (đúng như paper mô tả)
-        img = TF.resized_crop(img, 0, 0, img.shape[1], img.shape[2],
-                              [96, 96], scale=(0.8, 1.0), ratio=(1.0, 1.0))
+        # Random crop + resize (scaling) – dùng RandomResizedCrop
+        img = self.random_crop(img)
+
         # Random horizontal flip
         if torch.rand(1) > 0.5:
             img = TF.hflip(img)
@@ -168,14 +138,14 @@ class BreastDMDataset(Dataset):
         # 1. Đọc và xếp chồng kênh
         img = self._load_and_stack(patient_dir, slice_name)  # (C, H, W)
 
-        # 2. Augmentation (chỉ áp dụng cho tập train, đã bao gồm resize)
+        # 2. Augmentation (chỉ tập train, đã bao gồm resize về 96x96)
         if self.augment:
             img = self._augment(img)
 
         # 3. Chuẩn hóa cường độ
         img = self._intensity_normalize(img)
 
-        # 4. Resize về 96x96 (đảm bảo kích thước cho cả val/test)
+        # 4. Resize lần cuối (đảm bảo 96x96 cho cả val/test)
         img = TF.resize(img, [96, 96], antialias=True)
 
         return img, label
@@ -187,9 +157,6 @@ def create_dataloaders(
     batch_size: int = 16,
     num_workers: int = 4,
 ) -> Tuple[DataLoader, DataLoader, DataLoader]:
-    """
-    Tạo DataLoader cho train, val, test với augmentation chỉ trên train.
-    """
     train_dataset = BreastDMDataset(
         root_dir=root_dir,
         split="train",
@@ -232,9 +199,7 @@ def create_dataloaders(
     return train_loader, val_loader, test_loader
 
 
-# Ví dụ sử dụng
 if __name__ == "__main__":
-    # Giả sử dữ liệu nằm ở ./ROI-classification
     root = "/kaggle/input/roi-classification"
     train_loader, val_loader, test_loader = create_dataloaders(
         root_dir=root,
@@ -242,8 +207,7 @@ if __name__ == "__main__":
         batch_size=8,
         num_workers=2,
     )
-    # Kiểm tra một batch
     for imgs, labels in train_loader:
-        print(f"Batch shape: {imgs.shape}")   # [B, 17, 96, 96] với Exp-2
+        print(f"Batch shape: {imgs.shape}")
         print(f"Labels: {labels}")
         break
