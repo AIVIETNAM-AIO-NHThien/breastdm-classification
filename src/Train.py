@@ -100,7 +100,7 @@ optimizer = optim.SGD(model.parameters(),
                       weight_decay=args.weight_decay)
 
 # Scheduler: giảm lr khi val loss không cải thiện sau 10 epoch
-scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=10, verbose=True)
+scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.1)
 
 # -------------------------------
 # Hàm huấn luyện
