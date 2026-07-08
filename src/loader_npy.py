@@ -7,9 +7,9 @@ from typing import Tuple
 
 class BreastDMNpyDataset(Dataset):
     """
-    Dataset cho dữ liệu đã được tiền xử lý và lưu dưới dạng file .npy.
-    Mỗi file .npy chứa một mảng (C, 96, 96) đã stack 9 hoặc 17 kênh,
-    đã được chuẩn hóa cường độ và resize.
+    Dataset cho dữ liệu đã được lưu dưới dạng file .npy.
+    Mỗi file .npy chứa một mảng (C, H, W) hoặc (H, W, C) – có thể không đồng nhất kích thước.
+    Sẽ tự động chuyển về (C, 96, 96).
     """
     def __init__(
         self,
@@ -47,7 +47,7 @@ class BreastDMNpyDataset(Dataset):
         return len(self.samples)
 
     def _augment(self, img: torch.Tensor) -> torch.Tensor:
-        """Augmentation: flip và rotation (không crop vì dữ liệu đã 96x96)."""
+        """Augmentation: chỉ flip và rotation, KHÔNG crop vì ảnh đã nhỏ."""
         if torch.rand(1) > 0.5:
             img = TF.hflip(img)
         if torch.rand(1) > 0.5:
@@ -58,8 +58,30 @@ class BreastDMNpyDataset(Dataset):
         return img
 
     def __getitem__(self, index: int) -> Tuple[torch.Tensor, int]:
-        arr = np.load(self.samples[index])          # shape (C, 96, 96)
-        img = torch.from_numpy(arr).float()         # đã là float, không cần /255
+        arr = np.load(self.samples[index])   # có thể là (H, W, C) hoặc (C, H, W)
+
+        # Xác định và chuyển về dạng (C, H, W)
+        if arr.ndim == 3:
+            # Nếu chiều cuối là 9 hoặc 17 => kênh ở cuối => transpose
+            if arr.shape[-1] in [9, 17]:
+                arr = np.transpose(arr, (2, 0, 1))
+            # Ngược lại, nếu chiều đầu là 9 hoặc 17 => đã đúng (C, H, W)
+            elif arr.shape[0] in [9, 17]:
+                pass  # giữ nguyên
+            else:
+                # Đoán: nếu chiều thứ nhất nhỏ hơn 10 => coi là kênh
+                if arr.shape[0] < 10:
+                    pass  # coi như (C, H, W)
+                else:
+                    # Mặc định coi kênh ở cuối
+                    arr = np.transpose(arr, (2, 0, 1))
+        else:
+            raise ValueError(f"Unexpected array shape: {arr.shape}")
+
+        img = torch.from_numpy(arr).float()
+
+        # Resize về 96x96 (dùng antialias để giữ chất lượng)
+        img = TF.resize(img, [96, 96], antialias=True)
 
         if self.augment:
             img = self._augment(img)
@@ -91,9 +113,9 @@ def create_dataloaders_npy(
 
 if __name__ == "__main__":
     # Test nhanh
-    root = "/kaggle/input/breast-dm/cls/img9Se"   # ví dụ cho Exp-1
+    root = "/kaggle/input/breast-dm/cls/img9Se"
     train_loader, val_loader, test_loader = create_dataloaders_npy(root, batch_size=8)
     for imgs, labels in train_loader:
-        print("Batch shape:", imgs.shape)   # [B, 9, 96, 96]
+        print("Batch shape:", imgs.shape)   # Kỳ vọng [B, 9, 96, 96]
         print("Labels:", labels)
         break
