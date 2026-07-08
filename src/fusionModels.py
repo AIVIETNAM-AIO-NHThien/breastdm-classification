@@ -214,10 +214,6 @@ class FCUUp(nn.Module):
 
 
 class FusionM(nn.Module):
-    """
-    LG‑CAFN model for breast MRI classification.
-    Supports multi‑channel input (9 or 17 channels) and ViT‑7 backbone.
-    """
     def __init__(self, num_classes=2, in_c=9, load_vit=False):
         super(FusionM, self).__init__()
         self.in_c = in_c
@@ -225,93 +221,122 @@ class FusionM(nn.Module):
         self.path = r'./model/vit_base_patch16_224_in21k.pth'
 
         # ----- ViT branch -----
-        # VisionTransformer_base automatically calls _init_vit_weights inside its __init__
-        self.vit = VisionTransformer_base(img_size=96, patch_size=16, in_c=in_c,
-                                         num_classes=num_classes, depth=7)
+        self.vit = VisionTransformer_base(
+            img_size=96, patch_size=16, in_c=in_c,
+            num_classes=num_classes, depth=7
+        )
 
-        # Optionally load pretrained ViT weights (ignore size mismatches)
         if self.load_vit_flag:
             self._load_pretrained_vit()
 
-        # ----- CNN branch (first two stages of SE‑ResNet50) -----
+        # ----- CNN branch (SE-ResNet50) -----
+        # Tắt kiểm tra SSL để tránh lỗi chứng chỉ hết hạn
+        import ssl
+        ssl._create_default_https_context = ssl._create_unverified_context
+
         model_se = premodels.se_resnet50()
-        # Replace the first conv layer to accept `in_c` channels
+
+        # Thay conv1 để nhận đúng số kênh
         old_conv = model_se.layer0[0]
-        new_conv = nn.Conv2d(in_c, old_conv.out_channels,
-                             kernel_size=old_conv.kernel_size,
-                             stride=old_conv.stride,
-                             padding=old_conv.padding,
-                             bias=False)
-        # Apply kaiming init to the new conv layer
+        new_conv = nn.Conv2d(
+            in_c, old_conv.out_channels,
+            kernel_size=old_conv.kernel_size,
+            stride=old_conv.stride,
+            padding=old_conv.padding,
+            bias=False
+        )
         nn.init.kaiming_normal_(new_conv.weight, mode="fan_out")
-        
-        # Keep the rest of layer0 unchanged (with pretrained weights)
+
         self.layer0 = nn.Sequential(new_conv, *model_se.layer0[1:])
         self.layer1 = model_se.layer1
         self.layer2 = model_se.layer2
-        # Stage 3 and 4 are not used (as per paper)
-        # self.layer3 = model_se.layer3
-        # self.layer4 = model_se.layer4
 
-        # ----- Cross‑attention and fusion -----
-        self.Nlblock = NLBlockND(in_channels=512)   # operates on 512‑dim feature maps
+        # ----- Fusion -----
+        self.Nlblock = NLBlockND(in_channels=512)
         self.fcuup = FCUUp(inplanes=768, outplanes=512, up_stride=2)
 
         # ----- Classifier -----
         self.avgpool = nn.AdaptiveAvgPool2d(1)
-        self.fc = nn.Linear(1024, num_classes)      # 512 (CNN) + 512 (ViT after FCU)
+        self.fc = nn.Linear(1024, num_classes)
 
-        # Initialize ONLY the new layers (ViT already initialized, CNN loaded from pretrained)
+        # Khởi tạo các layer mới thêm
         self._init_new_layers()
 
     def _init_new_layers(self):
-        """Initialize only newly added layers (FCU, NLBlock, classifier)."""
         for m in [self.fcuup, self.Nlblock, self.fc]:
             m.apply(_init_vit_weights)
 
     def _load_pretrained_vit(self):
-        """Load pretrained ViT weights, ignoring mismatched layers (e.g. head, pos_embed)."""
+        """Xử lý triệt để sai khác shape trước khi load."""
         try:
+            if not os.path.exists(self.path):
+                print(f"⚠️  Pretrained ViT not found at {self.path}")
+                return
+
             state_dict = torch.load(self.path, map_location='cpu')
-            
-            # Remove classification head if present
+
+            # Xoá head không cần thiết
             for k in ['head.weight', 'head.bias', 'head_dist.weight', 'head_dist.bias']:
                 state_dict.pop(k, None)
-            
-            # Load with strict=False – mismatched layers keep _init_vit_weights values
-            missing_keys, unexpected_keys = self.vit.load_state_dict(state_dict, strict=False)
-            
-            print(f"✅ Loaded pretrained ViT from {self.path}")
-            if missing_keys:
-                print(f"   Missing keys (kept from _init_vit_weights): {missing_keys}")
-            if unexpected_keys:
-                print(f"   Unexpected keys (ignored): {unexpected_keys}")
-                
-        except FileNotFoundError:
-            print(f"⚠️  Pretrained ViT not found at {self.path}. Training from scratch.")
+
+            # --- 1. Xử lý pos_embed: nội suy từ 197 -> 37 tokens ---
+            if 'pos_embed' in state_dict:
+                pretrained_pos = state_dict['pos_embed']          # [1, 197, 768]
+                current_pos = self.vit.pos_embed                  # [1, 37, 768]
+                if pretrained_pos.shape != current_pos.shape:
+                    print(f"🔄 Interpolating pos_embed: {pretrained_pos.shape} → {current_pos.shape}")
+                    cls_token = pretrained_pos[:, :1, :]          # [1, 1, 768]
+                    patches = pretrained_pos[:, 1:, :]            # [1, 196, 768]
+                    grid_size = int(patches.shape[1] ** 0.5)      # 14
+                    new_grid = int((current_pos.shape[1] - 1) ** 0.5)  # 6
+
+                    # Reshape -> 2D -> interpolate -> reshape về
+                    patches = patches.reshape(1, grid_size, grid_size, -1).permute(0, 3, 1, 2)
+                    patches = F.interpolate(patches, size=(new_grid, new_grid), mode='bicubic')
+                    patches = patches.permute(0, 2, 3, 1).reshape(1, new_grid * new_grid, -1)
+
+                    state_dict['pos_embed'] = torch.cat([cls_token, patches], dim=1)
+
+            # --- 2. Xử lý patch_embed.proj.weight: mở rộng kênh 3 -> in_c ---
+            if 'patch_embed.proj.weight' in state_dict:
+                old_weight = state_dict['patch_embed.proj.weight']  # [768, 3, 16, 16]
+                new_channels = self.vit.patch_embed.proj.weight.shape[1]  # 9 hoặc 17
+                if old_weight.shape[1] != new_channels:
+                    print(f"🔄 Expanding patch_embed channels: {old_weight.shape[1]} → {new_channels}")
+                    avg_weight = old_weight.mean(dim=1, keepdim=True)  # [768, 1, 16, 16]
+                    state_dict['patch_embed.proj.weight'] = avg_weight.repeat(1, new_channels, 1, 1)
+
+            # Bây giờ shape đã khớp, dùng strict=True để load an toàn
+            missing, unexpected = self.vit.load_state_dict(state_dict, strict=True)
+            print(f"✅ Loaded pretrained ViT successfully")
+            if missing:
+                print(f"   Missing keys (will be randomly init): {missing}")
+            if unexpected:
+                print(f"   Unexpected keys (ignored): {unexpected}")
+
         except Exception as e:
-            print(f"⚠️  Error loading pretrained weights: {e}. Training from scratch.")
+            print(f"⚠️  Error loading pretrained ViT: {e}")
+            print("   Training ViT from scratch.")
 
     def forward(self, x):
         # ViT pathway
-        vit_x = self.vit(x)                         # (B, num_patches+1, 768)
-        # Compute spatial dimensions from number of patches
-        num_patches = vit_x.size(1) - 1             # exclude cls token
-        H = W = int(num_patches ** 0.5)            # 6 for 96x96 input
-        vit_feat = self.fcuup(vit_x, H, W)          # (B, 512, 12, 12)
+        vit_x = self.vit(x)                       # (B, 37, 768)
+        num_patches = vit_x.size(1) - 1
+        H = W = int(num_patches ** 0.5)           # 6
+        vit_feat = self.fcuup(vit_x, H, W)        # (B, 512, 12, 12)
 
-        # CNN pathway (first two stages)
+        # CNN pathway
         cnn_feat = self.layer0(x)
         cnn_feat = self.layer1(cnn_feat)
-        cnn_feat = self.layer2(cnn_feat)            # output: (B, 512, 12, 12) for 96x96 input
+        cnn_feat = self.layer2(cnn_feat)          # (B, 512, 12, 12)
 
-        # Cross‑attention fusion
-        out1 = self.Nlblock(cnn_feat, vit_feat)     # CNN queries ViT
-        out2 = self.Nlblock(vit_feat, cnn_feat)     # ViT queries CNN
-        fused = torch.cat((out1, out2), dim=1)      # (B, 1024, 12, 12)
+        # Cross attention
+        out1 = self.Nlblock(cnn_feat, vit_feat)
+        out2 = self.Nlblock(vit_feat, cnn_feat)
+        fused = torch.cat((out1, out2), dim=1)    # (B, 1024, 12, 12)
 
-        # Classification
-        pooled = self.avgpool(fused)                # (B, 1024, 1, 1)
+        # Classifier
+        pooled = self.avgpool(fused)
         pooled = pooled.view(pooled.size(0), -1)
         logits = self.fc(pooled)
         return logits
