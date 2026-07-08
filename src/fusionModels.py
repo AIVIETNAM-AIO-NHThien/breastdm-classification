@@ -1,16 +1,20 @@
+import os
+import ssl
 from functools import partial
 
-import pretrainedmodels.models as premodels
+import timm
+import torch
 from torch import nn
 import torch.nn.functional as F
+
+# File này được giả sử chứa các lớp PatchEmbed, Block, OrderedDict (nếu dùng trong VisionTransformer_base)
 from VIT_model import *
-import torch
 
 
+# ======================== NLBlock (Cross‑Attention) ========================
 class NLBlockND(nn.Module):
     """
     Non‑Local Block with cross‑attention between two branches.
-    (Implementation unchanged, kept for completeness.)
     """
     def __init__(self, in_channels, inter_channels=None, mode='embedded',
                  dimension=2, bn_layer=True):
@@ -107,11 +111,8 @@ class NLBlockND(nn.Module):
         return z
 
 
+# ======================== ViT Base (VisionTransformer_base) ========================
 class VisionTransformer_base(nn.Module):
-    """
-    ViT‑7 backbone for BreastDM.
-    Defaults: img_size=96, patch_size=16, in_c=9, depth=7.
-    """
     def __init__(self, img_size=96, patch_size=16, in_c=9, num_classes=2,
                  embed_dim=768, depth=7, num_heads=12, mlp_ratio=4.0, qkv_bias=True,
                  qk_scale=None, representation_size=None, distilled=False, drop_ratio=0.,
@@ -157,7 +158,7 @@ class VisionTransformer_base(nn.Module):
         if distilled:
             self.head_dist = nn.Linear(self.embed_dim, self.num_classes) if num_classes > 0 else nn.Identity()
 
-        # Initialize weights
+        # Init weights
         nn.init.trunc_normal_(self.pos_embed, std=0.02)
         if self.dist_token is not None:
             nn.init.trunc_normal_(self.dist_token, std=0.02)
@@ -178,7 +179,6 @@ class VisionTransformer_base(nn.Module):
 
 
 def _init_vit_weights(m):
-    """Weight initialisation for ViT and new CNN layers."""
     if isinstance(m, nn.Linear):
         nn.init.trunc_normal_(m.weight, std=.01)
         if m.bias is not None:
@@ -192,11 +192,8 @@ def _init_vit_weights(m):
         nn.init.ones_(m.weight)
 
 
+# ======================== FCU (Feature Coupling Unit) ========================
 class FCUUp(nn.Module):
-    """
-    Feature Coupling Unit: Transformer tokens → CNN feature maps.
-    inplanes=768 (ViT embed dim), outplanes=512 (to match CNN branch).
-    """
     def __init__(self, inplanes=768, outplanes=512, up_stride=2, act_layer=nn.ReLU,
                  norm_layer=partial(nn.BatchNorm2d, eps=1e-6)):
         super(FCUUp, self).__init__()
@@ -207,12 +204,12 @@ class FCUUp(nn.Module):
 
     def forward(self, x, H, W):
         B, _, C = x.shape
-        # Remove classification token and reshape to 2D feature map
         x_r = x[:, 1:].transpose(1, 2).reshape(B, C, H, W)
         x_r = self.act(self.bn(self.conv_project(x_r)))
         return F.interpolate(x_r, size=(H * self.up_stride, W * self.up_stride))
 
 
+# ======================== Main Fusion Model (LG‑CAFN) ========================
 class FusionM(nn.Module):
     def __init__(self, num_classes=2, in_c=9, load_vit=False):
         super(FusionM, self).__init__()
@@ -229,15 +226,33 @@ class FusionM(nn.Module):
         if self.load_vit_flag:
             self._load_pretrained_vit()
 
-        # ----- CNN branch (SE-ResNet50) -----
-        # Tắt kiểm tra SSL để tránh lỗi chứng chỉ hết hạn
-        import ssl
-        ssl._create_default_https_context = ssl._create_unverified_context
+        # ----- CNN branch (SE‑ResNet50) -----
+        # Sử dụng timm thay vì pretrainedmodels để tránh lỗi tải file khi offline/Kaggle
+        ssl._create_default_https_context = ssl._create_unverified_context  # phòng trường hợp cần
 
-        model_se = premodels.se_resnet50()
+        # Load SE‑ResNet50 pretrained từ timm (tự động tải từ Hugging Face nếu chưa có)
+        se_resnet = timm.create_model('seresnet50', pretrained=True)
 
-        # Thay conv1 để nhận đúng số kênh
-        old_conv = model_se.layer0[0]
+        # Tách các stage tương đương với pretrainedmodels:
+        # - layer0 (pretrainedmodels): conv1 + bn1 + act1 + maxpool + 3 SE blocks (stride 4, 256ch)
+        # - layer1 (pretrainedmodels): 4 SE blocks (stride 8, 512ch)
+        # - layer2 (pretrainedmodels): 6 SE blocks (stride 16, 1024ch)
+        # Trong timm:
+        #   conv1, bn1, act1, maxpool, layer1 (3 blocks) -> layer0
+        #   layer2 (4 blocks) -> layer1
+        #   layer3 (6 blocks) -> layer2
+        self.layer0 = nn.Sequential(
+            se_resnet.conv1,
+            se_resnet.bn1,
+            se_resnet.act1,
+            se_resnet.maxpool,
+            se_resnet.layer1
+        )
+        self.layer1 = se_resnet.layer2
+        self.layer2 = se_resnet.layer3
+
+        # Thay thế conv1 đầu tiên để phù hợp với số kênh đầu vào (in_c)
+        old_conv = self.layer0[0]  # conv1 gốc (3 kênh)
         new_conv = nn.Conv2d(
             in_c, old_conv.out_channels,
             kernel_size=old_conv.kernel_size,
@@ -246,12 +261,9 @@ class FusionM(nn.Module):
             bias=False
         )
         nn.init.kaiming_normal_(new_conv.weight, mode="fan_out")
+        self.layer0[0] = new_conv
 
-        self.layer0 = nn.Sequential(new_conv, *model_se.layer0[1:])
-        self.layer1 = model_se.layer1
-        self.layer2 = model_se.layer2
-
-        # ----- Fusion -----
+        # ----- Cross‑attention và fusion -----
         self.Nlblock = NLBlockND(in_channels=512)
         self.fcuup = FCUUp(inplanes=768, outplanes=512, up_stride=2)
 
@@ -259,7 +271,7 @@ class FusionM(nn.Module):
         self.avgpool = nn.AdaptiveAvgPool2d(1)
         self.fc = nn.Linear(1024, num_classes)
 
-        # Khởi tạo các layer mới thêm
+        # Khởi tạo các layer mới thêm (FCU, NLBlock, FC)
         self._init_new_layers()
 
     def _init_new_layers(self):
@@ -267,7 +279,7 @@ class FusionM(nn.Module):
             m.apply(_init_vit_weights)
 
     def _load_pretrained_vit(self):
-        """Xử lý triệt để sai khác shape trước khi load."""
+        """Xử lý load pretrained ViT: nội suy pos_embed và mở rộng kênh nếu cần."""
         try:
             if not os.path.exists(self.path):
                 print(f"⚠️  Pretrained ViT not found at {self.path}")
@@ -275,38 +287,37 @@ class FusionM(nn.Module):
 
             state_dict = torch.load(self.path, map_location='cpu')
 
-            # Xoá head không cần thiết
+            # Xóa head không cần thiết
             for k in ['head.weight', 'head.bias', 'head_dist.weight', 'head_dist.bias']:
                 state_dict.pop(k, None)
 
-            # --- 1. Xử lý pos_embed: nội suy từ 197 -> 37 tokens ---
+            # --- Xử lý pos_embed ---
             if 'pos_embed' in state_dict:
                 pretrained_pos = state_dict['pos_embed']          # [1, 197, 768]
                 current_pos = self.vit.pos_embed                  # [1, 37, 768]
                 if pretrained_pos.shape != current_pos.shape:
                     print(f"🔄 Interpolating pos_embed: {pretrained_pos.shape} → {current_pos.shape}")
-                    cls_token = pretrained_pos[:, :1, :]          # [1, 1, 768]
+                    cls_token = pretrained_pos[:, :1, :]
                     patches = pretrained_pos[:, 1:, :]            # [1, 196, 768]
                     grid_size = int(patches.shape[1] ** 0.5)      # 14
                     new_grid = int((current_pos.shape[1] - 1) ** 0.5)  # 6
 
-                    # Reshape -> 2D -> interpolate -> reshape về
                     patches = patches.reshape(1, grid_size, grid_size, -1).permute(0, 3, 1, 2)
                     patches = F.interpolate(patches, size=(new_grid, new_grid), mode='bicubic')
                     patches = patches.permute(0, 2, 3, 1).reshape(1, new_grid * new_grid, -1)
 
                     state_dict['pos_embed'] = torch.cat([cls_token, patches], dim=1)
 
-            # --- 2. Xử lý patch_embed.proj.weight: mở rộng kênh 3 -> in_c ---
+            # --- Xử lý patch_embed.proj.weight ---
             if 'patch_embed.proj.weight' in state_dict:
-                old_weight = state_dict['patch_embed.proj.weight']  # [768, 3, 16, 16]
+                old_weight = state_dict['patch_embed.proj.weight']   # [768, 3, 16, 16]
                 new_channels = self.vit.patch_embed.proj.weight.shape[1]  # 9 hoặc 17
                 if old_weight.shape[1] != new_channels:
                     print(f"🔄 Expanding patch_embed channels: {old_weight.shape[1]} → {new_channels}")
-                    avg_weight = old_weight.mean(dim=1, keepdim=True)  # [768, 1, 16, 16]
+                    avg_weight = old_weight.mean(dim=1, keepdim=True)   # [768, 1, 16, 16]
                     state_dict['patch_embed.proj.weight'] = avg_weight.repeat(1, new_channels, 1, 1)
 
-            # Bây giờ shape đã khớp, dùng strict=True để load an toàn
+            # Load với strict=True vì mọi shape đã khớp
             missing, unexpected = self.vit.load_state_dict(state_dict, strict=True)
             print(f"✅ Loaded pretrained ViT successfully")
             if missing:
@@ -328,37 +339,35 @@ class FusionM(nn.Module):
         # CNN pathway
         cnn_feat = self.layer0(x)
         cnn_feat = self.layer1(cnn_feat)
-        cnn_feat = self.layer2(cnn_feat)          # (B, 512, 12, 12)
+        cnn_feat = self.layer2(cnn_feat)          # (B, 512, 12, 12)  (vì stride 8: 96/8=12)
 
-        # Cross attention
-        out1 = self.Nlblock(cnn_feat, vit_feat)
-        out2 = self.Nlblock(vit_feat, cnn_feat)
+        # Cross‑attention fusion
+        out1 = self.Nlblock(cnn_feat, vit_feat)   # CNN query ViT
+        out2 = self.Nlblock(vit_feat, cnn_feat)   # ViT query CNN
         fused = torch.cat((out1, out2), dim=1)    # (B, 1024, 12, 12)
 
-        # Classifier
+        # Classification
         pooled = self.avgpool(fused)
         pooled = pooled.view(pooled.size(0), -1)
         logits = self.fc(pooled)
         return logits
 
 
+# ======================== Test ========================
 if __name__ == '__main__':
-    # Quick test: 9‑channel input 96x96
     print("Testing with 9 channels (Exp-1)...")
     dummy = torch.rand(2, 9, 96, 96)
     model = FusionM(num_classes=2, in_c=9, load_vit=False)
     out = model(dummy)
-    print("Output shape:", out.shape)  # Expected: [2, 2]
+    print("Output shape:", out.shape)
 
-    # Test with 17 channels
     print("\nTesting with 17 channels (Exp-2)...")
     dummy17 = torch.rand(2, 17, 96, 96)
     model17 = FusionM(num_classes=2, in_c=17, load_vit=False)
     out17 = model17(dummy17)
-    print("Output shape:", out17.shape)  # Expected: [2, 2]
-    
-    # Test with pretrained weights
+    print("Output shape:", out17.shape)
+
     print("\nTesting with pretrained ViT weights...")
     model_pretrained = FusionM(num_classes=2, in_c=17, load_vit=True)
     out_pretrained = model_pretrained(dummy17)
-    print("Output shape:", out_pretrained.shape)  # Expected: [2, 2]
+    print("Output shape:", out_pretrained.shape)
