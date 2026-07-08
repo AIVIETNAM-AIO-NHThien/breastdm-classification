@@ -11,7 +11,20 @@ import sys
 # Import custom data loader and model
 from data_loader_original import create_dataloaders   # hoặc đổi tên thành get_breast_loaders nếu bạn đã định nghĩa
 from fusionModels import FusionM                          # file Fusion.py đã được chỉnh sửa
+import random
+import numpy as np
+import torch
 
+def set_seed(seed=8):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)  # nếu dùng đa GPU
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+set_seed(8)  # giống seed của tác giả
 # -------------------------------
 # Cấu hình dòng lệnh
 # -------------------------------
