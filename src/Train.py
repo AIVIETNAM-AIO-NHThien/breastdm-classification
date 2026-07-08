@@ -191,7 +191,7 @@ for epoch in range(1, args.epochs + 1):
     val_loss, val_acc, val_auc = evaluate(model, val_loader, criterion, device, 'Val')
 
     # Scheduler step dựa trên validation loss
-    scheduler.step(val_loss)
+    scheduler.step
 
     # Lưu checkpoint tốt nhất dựa trên accuracy
     if val_acc > best_val_acc:
