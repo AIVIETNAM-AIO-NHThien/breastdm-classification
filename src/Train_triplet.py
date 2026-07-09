@@ -132,7 +132,8 @@ scheduler = StepLR(optimizer, step_size=10, gamma=0.1)
 # -------------------------------
 def batch_semihard_triplet_loss(embeddings, labels, margin=1.0):
     pairwise_dist = torch.cdist(embeddings, embeddings, p=2)
-    loss = 0.0
+    # Bắt đầu bằng một tensor 0.0 thay vì float
+    loss = torch.tensor(0.0, device=embeddings.device, dtype=embeddings.dtype)
     num_triplets = 0
     device = embeddings.device
 
@@ -152,16 +153,16 @@ def batch_semihard_triplet_loss(embeddings, labels, margin=1.0):
             continue
 
         hardest_semihard_dist = neg_dists[semi_hard_mask].min()
+        # F.relu trả về tensor, cộng dồn vào loss
         loss += F.relu(hardest_pos_dist - hardest_semihard_dist + margin)
         num_triplets += 1
 
     if num_triplets > 0:
         loss = loss / num_triplets
     else:
-        loss = 0.0
-
-    # Trả về tensor để tương thích với phần còn lại của code
-    return torch.tensor(loss, device=embeddings.device, dtype=embeddings.dtype)
+        # Trường hợp không có triplet, tạo tensor 0 với requires_grad=True
+        loss = torch.tensor(0.0, device=embeddings.device, requires_grad=True)
+    return loss
 
 # -------------------------------
 # Hàm đánh giá bằng k-NN trên embedding (khi chỉ dùng triplet)
