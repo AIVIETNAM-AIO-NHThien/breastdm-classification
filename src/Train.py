@@ -10,7 +10,7 @@ import sys
 
 # Import custom data loader and model
 from data_loader_original import create_dataloaders   # hoặc đổi tên thành get_breast_loaders nếu bạn đã định nghĩa
-from fusionModels import FusionM                          # file Fusion.py đã được chỉnh sửa
+from Fusion_inflate import FusionM                          # file Fusion.py đã được chỉnh sửa
 import random
 import numpy as np
 import torch
