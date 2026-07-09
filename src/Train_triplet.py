@@ -157,7 +157,11 @@ def batch_semihard_triplet_loss(embeddings, labels, margin=1.0):
 
     if num_triplets > 0:
         loss = loss / num_triplets
-    return loss
+    else:
+        loss = 0.0
+
+    # Trả về tensor để tương thích với phần còn lại của code
+    return torch.tensor(loss, device=embeddings.device, dtype=embeddings.dtype)
 
 # -------------------------------
 # Hàm đánh giá bằng k-NN trên embedding (khi chỉ dùng triplet)
