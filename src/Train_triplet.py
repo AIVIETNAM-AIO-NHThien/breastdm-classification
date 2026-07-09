@@ -176,10 +176,12 @@ def batch_hard_triplet_loss(embeddings, labels, margin=1.0):
 
     loss = 0.0
     num_triplets = 0
+    device = embeddings.device   # lấy thiết bị của embeddings
 
     for i in range(len(labels)):
         anchor_label = labels[i]
-        pos_mask = (labels == anchor_label) & (torch.arange(len(labels)) != i)
+        # Tạo mask trên cùng thiết bị
+        pos_mask = (labels == anchor_label) & (torch.arange(len(labels), device=device) != i)
         neg_mask = (labels != anchor_label)
 
         if pos_mask.sum() == 0 or neg_mask.sum() == 0:
