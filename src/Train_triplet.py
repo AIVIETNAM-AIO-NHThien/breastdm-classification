@@ -125,8 +125,14 @@ scheduler = StepLR(optimizer, step_size=10, gamma=0.1)
 # -------------------------------
 # Batch Hard Triplet Loss (đã sửa device)
 # -------------------------------
-def batch_hard_triplet_loss(embeddings, labels, margin=1.0):
-    pairwise_dist = torch.cdist(embeddings, embeddings, p=2)
+def batch_semihard_triplet_loss(embeddings, labels, margin=1.0):
+    """
+    Semi-hard triplet loss.
+    Với mỗi anchor, chọn positive xa nhất (hardest positive).
+    Sau đó chọn negative thỏa mãn: d(a,p) < d(a,n) < d(a,p) + margin.
+    Nếu không có negative nào thỏa mãn, bỏ qua anchor đó.
+    """
+    pairwise_dist = torch.cdist(embeddings, embeddings, p=2)   # (B, B)
     loss = 0.0
     num_triplets = 0
     device = embeddings.device
@@ -139,16 +145,27 @@ def batch_hard_triplet_loss(embeddings, labels, margin=1.0):
         if pos_mask.sum() == 0 or neg_mask.sum() == 0:
             continue
 
+        # Hardest positive (xa nhất)
         hardest_pos_dist = pairwise_dist[i][pos_mask].max()
-        hardest_neg_dist = pairwise_dist[i][neg_mask].min()
 
-        loss += F.relu(hardest_pos_dist - hardest_neg_dist + margin)
+        # Lấy tất cả khoảng cách tới negative
+        neg_dists = pairwise_dist[i][neg_mask]
+
+        # Semi-hard condition: d(a,p) < d(a,n) < d(a,p) + margin
+        semi_hard_mask = (neg_dists > hardest_pos_dist) & (neg_dists < hardest_pos_dist + margin)
+
+        if semi_hard_mask.sum() == 0:
+            continue   # không có negative semi-hard, bỏ qua anchor này
+
+        # Trong các semi-hard negative, chọn cái gần nhất (hardest semi-hard)
+        hardest_semihard_dist = neg_dists[semi_hard_mask].min()
+
+        loss += F.relu(hardest_pos_dist - hardest_semihard_dist + margin)
         num_triplets += 1
 
     if num_triplets > 0:
         loss = loss / num_triplets
     return loss
-
 # -------------------------------
 # Hàm huấn luyện một epoch
 # -------------------------------
@@ -175,7 +192,7 @@ def train_one_epoch(epoch, model, loader, optimizer, criterion_ce, criterion_tri
 
         if args.use_triplet:
             embeddings = model(data, return_embedding=True)
-            loss_triplet = batch_hard_triplet_loss(embeddings, target, args.triplet_margin)
+            loss_triplet = batch_semihard_triplet_loss(embeddings, target, args.triplet_margin)
             loss = loss_ce + args.triplet_weight * loss_triplet
             total_triplet += loss_triplet.item() * data.size(0)
 
