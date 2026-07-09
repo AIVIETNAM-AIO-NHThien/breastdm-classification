@@ -4,13 +4,14 @@ import random
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F  # <--- THÊM DÒNG NÀY
 import torch.optim as optim
 from torch.optim.lr_scheduler import StepLR
 from sklearn.metrics import accuracy_score, roc_auc_score, confusion_matrix, classification_report
 
 # Import data loader và model
-from data_loader_triplet import create_dataloaders   # đã được cập nhật với TripletBatchSampler
-from Fusion_triplet import FusionM                    # model đã có embedding head
+from data_loader_triplet import create_dataloaders
+from Fusion_triplet import FusionM
 
 # -------------------------------
 # Seed
@@ -29,7 +30,7 @@ set_seed(8)
 # -------------------------------
 # Cấu hình dòng lệnh
 # -------------------------------
-parser = argparse.ArgumentParser(description='LG-CAFN training on BreastDM (with optional triplet loss)')
+parser = argparse.ArgumentParser(description='LG-CAFN training on BreastDM (CE + Batch Hard Triplet)')
 parser.add_argument('--batch-size', type=int, default=16, help='batch size')
 parser.add_argument('--model', type=str, default='fusion', choices=['fusion'], help='model type')
 parser.add_argument('--gpu', type=str, default='0', help='GPU id(s)')
@@ -49,10 +50,10 @@ parser.add_argument('--num-workers', type=int, default=4, help='number of data l
 
 # Tham số cho triplet loss
 parser.add_argument('--use-triplet', action='store_true', default=False,
-                    help='Use triplet loss instead of cross-entropy')
+                    help='Enable triplet loss with batch hard mining (combined with CE)')
 parser.add_argument('--triplet-margin', type=float, default=1.0, help='margin for triplet loss')
 parser.add_argument('--triplet-weight', type=float, default=1.0,
-                    help='Weight of triplet loss when combined with CE (if both used)')
+                    help='Weight of triplet loss')
 parser.add_argument('--embedding-dim', type=int, default=128,
                     help='Dimension of embedding for triplet loss')
 
@@ -76,14 +77,14 @@ else:
     raise ValueError('Unknown experiment')
 
 # -------------------------------
-# Tạo DataLoader (với triplet sampler nếu cần)
+# Tạo DataLoader
 # -------------------------------
 train_loader, val_loader, test_loader = create_dataloaders(
     root_dir=args.data_root,
     experiment=args.experiment,
     batch_size=args.batch_size,
     num_workers=args.num_workers,
-    use_triplet=args.use_triplet   # truyền vào để dùng TripletBatchSampler
+    use_triplet=args.use_triplet
 )
 
 print(f"Train samples: {len(train_loader.dataset)}")
@@ -106,7 +107,7 @@ if len(args.gpu.split(',')) > 1:
     model = torch.nn.DataParallel(model, device_ids=list(range(len(args.gpu.split(',')))))
 
 # -------------------------------
-# Loss function
+# Loss functions
 # -------------------------------
 criterion_ce = nn.CrossEntropyLoss()
 criterion_triplet = nn.TripletMarginLoss(margin=args.triplet_margin, p=2.0)
@@ -122,7 +123,34 @@ optimizer = optim.SGD(model.parameters(),
 scheduler = StepLR(optimizer, step_size=10, gamma=0.1)
 
 # -------------------------------
-# Hàm huấn luyện
+# Batch Hard Triplet Loss (đã sửa device)
+# -------------------------------
+def batch_hard_triplet_loss(embeddings, labels, margin=1.0):
+    pairwise_dist = torch.cdist(embeddings, embeddings, p=2)
+    loss = 0.0
+    num_triplets = 0
+    device = embeddings.device
+
+    for i in range(len(labels)):
+        anchor_label = labels[i]
+        pos_mask = (labels == anchor_label) & (torch.arange(len(labels), device=device) != i)
+        neg_mask = (labels != anchor_label)
+
+        if pos_mask.sum() == 0 or neg_mask.sum() == 0:
+            continue
+
+        hardest_pos_dist = pairwise_dist[i][pos_mask].max()
+        hardest_neg_dist = pairwise_dist[i][neg_mask].min()
+
+        loss += F.relu(hardest_pos_dist - hardest_neg_dist + margin)
+        num_triplets += 1
+
+    if num_triplets > 0:
+        loss = loss / num_triplets
+    return loss
+
+# -------------------------------
+# Hàm huấn luyện một epoch
 # -------------------------------
 def train_one_epoch(epoch, model, loader, optimizer, criterion_ce, criterion_triplet, device, args):
     model.train()
@@ -136,18 +164,17 @@ def train_one_epoch(epoch, model, loader, optimizer, criterion_ce, criterion_tri
         data, target = data.to(device), target.to(device)
         optimizer.zero_grad()
 
-        # Luôn lấy logits (cho CE và evaluation)
+        # Luôn lấy logits (cho CE và đánh giá)
         logits = model(data)
         loss_ce = criterion_ce(logits, target)
         _, pred = logits.max(1)
         correct += pred.eq(target).sum().item()
         total += target.size(0)
 
-        loss = loss_ce  # mặc định chỉ có CE
+        loss = loss_ce
 
         if args.use_triplet:
-            embeddings = model(data, return_embedding=True)   # (B, emb_dim)
-            # Batch hard triplet loss
+            embeddings = model(data, return_embedding=True)
             loss_triplet = batch_hard_triplet_loss(embeddings, target, args.triplet_margin)
             loss = loss_ce + args.triplet_weight * loss_triplet
             total_triplet += loss_triplet.item() * data.size(0)
@@ -169,38 +196,8 @@ def train_one_epoch(epoch, model, loader, optimizer, criterion_ce, criterion_tri
     print(f'Train Epoch: {epoch} - Avg loss: {avg_loss:.4f}, CE: {avg_ce:.4f}, Triplet: {avg_triplet:.4f}, Accuracy: {acc:.2f}%')
     return avg_loss, acc
 
-
-def batch_hard_triplet_loss(embeddings, labels, margin=1.0):
-    """Batch hard triplet loss."""
-    pairwise_dist = torch.cdist(embeddings, embeddings, p=2)  # (B, B)
-
-    loss = 0.0
-    num_triplets = 0
-    device = embeddings.device   # lấy thiết bị của embeddings
-
-    for i in range(len(labels)):
-        anchor_label = labels[i]
-        # Tạo mask trên cùng thiết bị
-        pos_mask = (labels == anchor_label) & (torch.arange(len(labels), device=device) != i)
-        neg_mask = (labels != anchor_label)
-
-        if pos_mask.sum() == 0 or neg_mask.sum() == 0:
-            continue
-
-        # Hardest positive (xa nhất)
-        hardest_pos_dist = pairwise_dist[i][pos_mask].max()
-        # Hardest negative (gần nhất)
-        hardest_neg_dist = pairwise_dist[i][neg_mask].min()
-
-        loss += F.relu(hardest_pos_dist - hardest_neg_dist + margin)
-        num_triplets += 1
-
-    if num_triplets > 0:
-        loss = loss / num_triplets
-    return loss
-
 # -------------------------------
-# Hàm validation / test (luôn dùng classifier)
+# Hàm validation / test
 # -------------------------------
 def evaluate(model, loader, criterion_ce, device, target_name='Val'):
     model.eval()
@@ -214,7 +211,7 @@ def evaluate(model, loader, criterion_ce, device, target_name='Val'):
     with torch.no_grad():
         for data, target in loader:
             data, target = data.to(device), target.to(device)
-            output = model(data)   # dùng logits
+            output = model(data)
             loss = criterion_ce(output, target)
 
             total_loss += loss.item() * data.size(0)
@@ -251,8 +248,8 @@ os.makedirs(args.save_dir, exist_ok=True)
 for epoch in range(1, args.epochs + 1):
     print(f'\n===== Epoch {epoch}/{args.epochs} =====')
     if args.use_triplet:
-        train_loss, _ = train_one_epoch(epoch, model, train_loader, optimizer,
-                                        criterion_ce, criterion_triplet, device, args)
+        train_loss, train_acc = train_one_epoch(epoch, model, train_loader, optimizer,
+                                                criterion_ce, criterion_triplet, device, args)
     else:
         train_loss, train_acc = train_one_epoch(epoch, model, train_loader, optimizer,
                                                 criterion_ce, criterion_triplet, device, args)
@@ -260,15 +257,11 @@ for epoch in range(1, args.epochs + 1):
     val_loss, val_acc, val_auc = evaluate(model, val_loader, criterion_ce, device, 'Val')
     scheduler.step()
 
-    # Lưu checkpoint tốt nhất dựa trên accuracy (nếu dùng triplet vẫn tính accuracy qua evaluate)
     if val_acc > best_val_acc:
         best_val_acc = val_acc
         best_epoch = epoch
         save_path = os.path.join(args.save_dir, f'best_model_triplet_{args.experiment}.pth')
-        if isinstance(model, torch.nn.DataParallel):
-            state_dict = model.module.state_dict()
-        else:
-            state_dict = model.state_dict()
+        state_dict = model.module.state_dict() if isinstance(model, torch.nn.DataParallel) else model.state_dict()
         torch.save(state_dict, save_path)
         print(f'Checkpoint saved to {save_path} (val acc: {val_acc:.2f}%)')
 
