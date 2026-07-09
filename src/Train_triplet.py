@@ -4,10 +4,12 @@ import random
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F  # <--- THÊM DÒNG NÀY
+import torch.nn.functional as F
 import torch.optim as optim
 from torch.optim.lr_scheduler import StepLR
 from sklearn.metrics import accuracy_score, roc_auc_score, confusion_matrix, classification_report
+from sklearn.svm import SVC
+from sklearn.neighbors import KNeighborsClassifier
 
 # Import data loader và model
 from data_loader_triplet import create_dataloaders
@@ -30,7 +32,7 @@ set_seed(8)
 # -------------------------------
 # Cấu hình dòng lệnh
 # -------------------------------
-parser = argparse.ArgumentParser(description='LG-CAFN training on BreastDM (CE + Batch Hard Triplet)')
+parser = argparse.ArgumentParser(description='LG-CAFN training on BreastDM (CE + Triplet hoặc Only Triplet)')
 parser.add_argument('--batch-size', type=int, default=16, help='batch size')
 parser.add_argument('--model', type=str, default='fusion', choices=['fusion'], help='model type')
 parser.add_argument('--gpu', type=str, default='0', help='GPU id(s)')
@@ -50,14 +52,20 @@ parser.add_argument('--num-workers', type=int, default=4, help='number of data l
 
 # Tham số cho triplet loss
 parser.add_argument('--use-triplet', action='store_true', default=False,
-                    help='Enable triplet loss with batch hard mining (combined with CE)')
+                    help='Enable triplet loss (combined with CE if not only-triplet)')
+parser.add_argument('--only-triplet', action='store_true', default=False,
+                    help='Use only triplet loss (no cross-entropy). Evaluation will use SVM.')
 parser.add_argument('--triplet-margin', type=float, default=1.0, help='margin for triplet loss')
 parser.add_argument('--triplet-weight', type=float, default=1.0,
-                    help='Weight of triplet loss')
+                    help='Weight of triplet loss (when combined with CE)')
 parser.add_argument('--embedding-dim', type=int, default=128,
                     help='Dimension of embedding for triplet loss')
 
 args = parser.parse_args()
+
+# Đảm bảo nếu chỉ dùng only-triplet thì use-triplet phải True
+if args.only_triplet:
+    args.use_triplet = True
 
 # -------------------------------
 # Thiết bị GPU
@@ -84,7 +92,7 @@ train_loader, val_loader, test_loader = create_dataloaders(
     experiment=args.experiment,
     batch_size=args.batch_size,
     num_workers=args.num_workers,
-    use_triplet=args.use_triplet
+    use_triplet=args.use_triplet  # vẫn dùng triplet sampler nếu use_triplet
 )
 
 print(f"Train samples: {len(train_loader.dataset)}")
@@ -123,16 +131,10 @@ optimizer = optim.SGD(model.parameters(),
 scheduler = StepLR(optimizer, step_size=10, gamma=0.1)
 
 # -------------------------------
-# Batch Hard Triplet Loss (đã sửa device)
+# Semi-hard triplet loss
 # -------------------------------
 def batch_semihard_triplet_loss(embeddings, labels, margin=1.0):
-    """
-    Semi-hard triplet loss.
-    Với mỗi anchor, chọn positive xa nhất (hardest positive).
-    Sau đó chọn negative thỏa mãn: d(a,p) < d(a,n) < d(a,p) + margin.
-    Nếu không có negative nào thỏa mãn, bỏ qua anchor đó.
-    """
-    pairwise_dist = torch.cdist(embeddings, embeddings, p=2)   # (B, B)
+    pairwise_dist = torch.cdist(embeddings, embeddings, p=2)
     loss = 0.0
     num_triplets = 0
     device = embeddings.device
@@ -145,27 +147,21 @@ def batch_semihard_triplet_loss(embeddings, labels, margin=1.0):
         if pos_mask.sum() == 0 or neg_mask.sum() == 0:
             continue
 
-        # Hardest positive (xa nhất)
         hardest_pos_dist = pairwise_dist[i][pos_mask].max()
-
-        # Lấy tất cả khoảng cách tới negative
         neg_dists = pairwise_dist[i][neg_mask]
 
-        # Semi-hard condition: d(a,p) < d(a,n) < d(a,p) + margin
         semi_hard_mask = (neg_dists > hardest_pos_dist) & (neg_dists < hardest_pos_dist + margin)
-
         if semi_hard_mask.sum() == 0:
-            continue   # không có negative semi-hard, bỏ qua anchor này
+            continue
 
-        # Trong các semi-hard negative, chọn cái gần nhất (hardest semi-hard)
         hardest_semihard_dist = neg_dists[semi_hard_mask].min()
-
         loss += F.relu(hardest_pos_dist - hardest_semihard_dist + margin)
         num_triplets += 1
 
     if num_triplets > 0:
         loss = loss / num_triplets
     return loss
+
 # -------------------------------
 # Hàm huấn luyện một epoch
 # -------------------------------
@@ -181,40 +177,49 @@ def train_one_epoch(epoch, model, loader, optimizer, criterion_ce, criterion_tri
         data, target = data.to(device), target.to(device)
         optimizer.zero_grad()
 
-        # Luôn lấy logits (cho CE và đánh giá)
-        logits = model(data)
-        loss_ce = criterion_ce(logits, target)
-        _, pred = logits.max(1)
-        correct += pred.eq(target).sum().item()
-        total += target.size(0)
-
-        loss = loss_ce
-
-        if args.use_triplet:
+        if args.only_triplet:
             embeddings = model(data, return_embedding=True)
-            loss_triplet = batch_semihard_triplet_loss(embeddings, target, args.triplet_margin)
-            loss = loss_ce + args.triplet_weight * loss_triplet
-            total_triplet += loss_triplet.item() * data.size(0)
+            loss = batch_semihard_triplet_loss(embeddings, target, args.triplet_margin)
+            total_triplet += loss.item() * data.size(0)
+        else:
+            logits = model(data)
+            loss_ce = criterion_ce(logits, target)
+            _, pred = logits.max(1)
+            correct += pred.eq(target).sum().item()
+            total += target.size(0)
+
+            loss = loss_ce
+            if args.use_triplet:
+                embeddings = model(data, return_embedding=True)
+                loss_triplet = batch_semihard_triplet_loss(embeddings, target, args.triplet_margin)
+                loss = loss_ce + args.triplet_weight * loss_triplet
+                total_triplet += loss_triplet.item() * data.size(0)
 
         loss.backward()
         optimizer.step()
 
         total_loss += loss.item() * data.size(0)
-        total_ce += loss_ce.item() * data.size(0)
+        if not args.only_triplet:
+            total_ce += loss_ce.item() * data.size(0)
 
         if batch_idx % 10 == 0:
             print(f'Train Epoch: {epoch} [{batch_idx * len(data)}/{len(loader.dataset)} '
                   f'({100. * batch_idx / len(loader):.0f}%)]\tLoss: {loss.item():.6f}')
 
-    avg_loss = total_loss / total
-    avg_ce = total_ce / total
-    avg_triplet = total_triplet / total if args.use_triplet else 0.0
-    acc = 100. * correct / total
-    print(f'Train Epoch: {epoch} - Avg loss: {avg_loss:.4f}, CE: {avg_ce:.4f}, Triplet: {avg_triplet:.4f}, Accuracy: {acc:.2f}%')
-    return avg_loss, acc
+    avg_loss = total_loss / len(loader.dataset)
+    avg_ce = total_ce / len(loader.dataset) if not args.only_triplet else 0.0
+    avg_triplet = total_triplet / len(loader.dataset) if (args.use_triplet or args.only_triplet) else 0.0
+
+    if args.only_triplet:
+        print(f'Train Epoch: {epoch} - Avg loss: {avg_loss:.4f}, Triplet: {avg_triplet:.4f}')
+        return avg_loss, None
+    else:
+        acc = 100. * correct / total
+        print(f'Train Epoch: {epoch} - Avg loss: {avg_loss:.4f}, CE: {avg_ce:.4f}, Triplet: {avg_triplet:.4f}, Accuracy: {acc:.2f}%')
+        return avg_loss, acc
 
 # -------------------------------
-# Hàm validation / test
+# Hàm đánh giá bằng classifier (dùng khi có CE)
 # -------------------------------
 def evaluate(model, loader, criterion_ce, device, target_name='Val'):
     model.eval()
@@ -256,47 +261,107 @@ def evaluate(model, loader, criterion_ce, device, target_name='Val'):
     return avg_loss, acc, auc
 
 # -------------------------------
+# Hàm đánh giá bằng SVM/kNN trên embedding (dùng khi only_triplet)
+# -------------------------------
+def evaluate_embedding_svm(model, train_loader, test_loader, device, clf_type='svm'):
+    model.eval()
+    train_embs, train_labels = [], []
+    test_embs, test_labels = [], []
+
+    with torch.no_grad():
+        for data, target in train_loader:
+            emb = model(data.to(device), return_embedding=True).cpu().numpy()
+            train_embs.append(emb)
+            train_labels.append(target.numpy())
+        for data, target in test_loader:
+            emb = model(data.to(device), return_embedding=True).cpu().numpy()
+            test_embs.append(emb)
+            test_labels.append(target.numpy())
+
+    X_train = np.concatenate(train_embs)
+    y_train = np.concatenate(train_labels)
+    X_test = np.concatenate(test_embs)
+    y_test = np.concatenate(test_labels)
+
+    if clf_type == 'svm':
+        clf = SVC(kernel='rbf', probability=True, random_state=42)
+    else:
+        clf = KNeighborsClassifier(n_neighbors=5)
+
+    clf.fit(X_train, y_train)
+    y_pred = clf.predict(X_test)
+    y_proba = clf.predict_proba(X_test)[:, 1]
+
+    acc = accuracy_score(y_test, y_pred)
+    auc = roc_auc_score(y_test, y_proba)
+    print(f"\n{clf_type.upper()} Test Accuracy: {acc*100:.2f}%, AUC: {auc:.4f}")
+    print(classification_report(y_test, y_pred, target_names=['Benign', 'Malignant'], digits=4))
+    return acc, auc
+
+# -------------------------------
 # Vòng lặp chính
 # -------------------------------
 best_val_acc = 0.0
 best_epoch = -1
 os.makedirs(args.save_dir, exist_ok=True)
 
-for epoch in range(1, args.epochs + 1):
-    print(f'\n===== Epoch {epoch}/{args.epochs} =====')
-    if args.use_triplet:
-        train_loss, train_acc = train_one_epoch(epoch, model, train_loader, optimizer,
-                                                criterion_ce, criterion_triplet, device, args)
-    else:
-        train_loss, train_acc = train_one_epoch(epoch, model, train_loader, optimizer,
-                                                criterion_ce, criterion_triplet, device, args)
+if args.only_triplet:
+    # Chỉ dùng triplet loss
+    best_loss = float('inf')
+    for epoch in range(1, args.epochs + 1):
+        print(f'\n===== Epoch {epoch}/{args.epochs} =====')
+        train_loss, _ = train_one_epoch(epoch, model, train_loader, optimizer,
+                                        criterion_ce, criterion_triplet, device, args)
+        scheduler.step()
 
-    val_loss, val_acc, val_auc = evaluate(model, val_loader, criterion_ce, device, 'Val')
-    scheduler.step()
+        if train_loss < best_loss:
+            best_loss = train_loss
+            save_path = os.path.join(args.save_dir, f'best_model_triplet_only_{args.experiment}.pth')
+            state_dict = model.module.state_dict() if isinstance(model, torch.nn.DataParallel) else model.state_dict()
+            torch.save(state_dict, save_path)
+            print(f'Checkpoint saved (train loss: {train_loss:.4f})')
 
-    if val_acc > best_val_acc:
-        best_val_acc = val_acc
-        best_epoch = epoch
-        save_path = os.path.join(args.save_dir, f'best_model_triplet_{args.experiment}.pth')
-        state_dict = model.module.state_dict() if isinstance(model, torch.nn.DataParallel) else model.state_dict()
-        torch.save(state_dict, save_path)
-        print(f'Checkpoint saved to {save_path} (val acc: {val_acc:.2f}%)')
-
-print(f'\nTraining finished. Best validation accuracy: {best_val_acc:.2f}% at epoch {best_epoch}')
-
-# -------------------------------
-# Đánh giá trên tập test
-# -------------------------------
-print('\nLoading best model for test evaluation...')
-best_model_path = os.path.join(args.save_dir, f'best_model_triplet_{args.experiment}.pth')
-if os.path.exists(best_model_path):
-    model_test = FusionM(num_classes=args.num_class, in_c=in_channels,
+    # Đánh giá cuối cùng với SVM trên test set
+    print('\nLoading best model for SVM evaluation...')
+    best_model_path = os.path.join(args.save_dir, f'best_model_triplet_only_{args.experiment}.pth')
+    model_best = FusionM(num_classes=args.num_class, in_c=in_channels,
                          load_vit=False, embedding_dim=args.embedding_dim)
-    model_test.load_state_dict(torch.load(best_model_path, map_location=device))
-    model_test = model_test.to(device)
+    model_best.load_state_dict(torch.load(best_model_path, map_location=device))
+    model_best = model_best.to(device)
     if len(args.gpu.split(',')) > 1:
-        model_test = torch.nn.DataParallel(model_test)
-    test_loss, test_acc, test_auc = evaluate(model_test, test_loader, criterion_ce, device, 'Test')
+        model_best = torch.nn.DataParallel(model_best)
+    evaluate_embedding_svm(model_best, train_loader, test_loader, device, clf_type='svm')
+
 else:
-    print('Best model not found, evaluating current model.')
-    test_loss, test_acc, test_auc = evaluate(model, test_loader, criterion_ce, device, 'Test')
+    # Chế độ CE (có thể kèm triplet)
+    for epoch in range(1, args.epochs + 1):
+        print(f'\n===== Epoch {epoch}/{args.epochs} =====')
+        train_loss, train_acc = train_one_epoch(epoch, model, train_loader, optimizer,
+                                                criterion_ce, criterion_triplet, device, args)
+        val_loss, val_acc, val_auc = evaluate(model, val_loader, criterion_ce, device, 'Val')
+        scheduler.step()
+
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+            best_epoch = epoch
+            save_path = os.path.join(args.save_dir, f'best_model_triplet_{args.experiment}.pth')
+            state_dict = model.module.state_dict() if isinstance(model, torch.nn.DataParallel) else model.state_dict()
+            torch.save(state_dict, save_path)
+            print(f'Checkpoint saved to {save_path} (val acc: {val_acc:.2f}%)')
+
+    print(f'\nTraining finished. Best validation accuracy: {best_val_acc:.2f}% at epoch {best_epoch}')
+
+    # Đánh giá trên tập test với model tốt nhất
+    print('\nLoading best model for test evaluation...')
+    best_model_path = os.path.join(args.save_dir, f'best_model_triplet_{args.experiment}.pth')
+    if os.path.exists(best_model_path):
+        model_test = FusionM(num_classes=args.num_class, in_c=in_channels,
+                             load_vit=False, embedding_dim=args.embedding_dim)
+        model_test.load_state_dict(torch.load(best_model_path, map_location=device))
+        model_test = model_test.to(device)
+        if len(args.gpu.split(',')) > 1:
+            model_test = torch.nn.DataParallel(model_test)
+        test_loss, test_acc, test_auc = evaluate(model_test, test_loader, criterion_ce, device, 'Test')
+    else:
+        print('Best model not found, evaluating current model.')
+        test_loss, test_acc, test_auc = evaluate(model, test_loader, criterion_ce, device, 'Test')
