@@ -127,6 +127,8 @@ scheduler = StepLR(optimizer, step_size=10, gamma=0.1)
 def train_one_epoch(epoch, model, loader, optimizer, criterion_ce, criterion_triplet, device, args):
     model.train()
     total_loss = 0.0
+    total_ce = 0.0
+    total_triplet = 0.0
     correct = 0
     total = 0
 
@@ -134,74 +136,66 @@ def train_one_epoch(epoch, model, loader, optimizer, criterion_ce, criterion_tri
         data, target = data.to(device), target.to(device)
         optimizer.zero_grad()
 
+        # Luôn lấy logits (cho CE và evaluation)
+        logits = model(data)
+        loss_ce = criterion_ce(logits, target)
+        _, pred = logits.max(1)
+        correct += pred.eq(target).sum().item()
+        total += target.size(0)
+
+        loss = loss_ce  # mặc định chỉ có CE
+
         if args.use_triplet:
-            # Lấy embedding
-            embeddings = model(data, return_embedding=True)   # (B, embedding_dim)
-
-            # Tạo triplet ngay trong batch
-            # Yêu cầu batch có ít nhất 2 mẫu mỗi lớp (đảm bảo bởi TripletBatchSampler)
-            loss = 0.0
-            # Lấy mask cho từng lớp
-            for cls in range(args.num_class):
-                mask = (target == cls)
-                if mask.sum() < 2:
-                    continue  # không đủ mẫu để tạo triplet cho lớp này
-                # Anchor: tất cả mẫu của lớp cls
-                anchor_emb = embeddings[mask]
-                # Positive: chọn ngẫu nhiên các mẫu khác trong cùng lớp (có thể lấy toàn bộ rồi tính)
-                # Với mỗi anchor, chọn một positive khác anchor
-                # Ở đây ta dùng cách đơn giản: với mỗi anchor, chọn một positive bất kỳ khác trong batch (cùng lớp)
-                # và một negative từ lớp còn lại.
-                other_cls = 1 - cls
-                neg_mask = (target == other_cls)
-                if neg_mask.sum() == 0:
-                    continue
-                neg_emb = embeddings[neg_mask]
-
-                # Tính all triplet loss cho lớp này: mỗi anchor với mỗi positive (khác anchor) và mỗi negative
-                # Để đơn giản, ta lấy mỗi anchor, một positive ngẫu nhiên, một negative ngẫu nhiên
-                for i in range(anchor_emb.size(0)):
-                    anchor = anchor_emb[i].unsqueeze(0)
-                    # Chọn một positive khác anchor (nếu có >1 mẫu)
-                    pos_indices = torch.where(mask)[0]
-                    # loại bỏ chính nó
-                    pos_candidates = [idx for idx in pos_indices if idx != torch.where(mask)[0][i]]
-                    if len(pos_candidates) == 0:
-                        continue
-                    pos_idx = random.choice(pos_candidates)
-                    positive = embeddings[pos_idx].unsqueeze(0)
-                    # Chọn một negative ngẫu nhiên
-                    neg_idx = random.choice(torch.where(neg_mask)[0])
-                    negative = embeddings[neg_idx].unsqueeze(0)
-                    loss += criterion_triplet(anchor, positive, negative)
-            loss = loss / (mask.sum() + 1e-8)   # trung bình
-        else:
-            # Cross-entropy
-            output = model(data)
-            loss = criterion_ce(output, target)
-            # Tính accuracy cho CE
-            _, pred = output.max(1)
-            correct += pred.eq(target).sum().item()
-            total += target.size(0)
+            embeddings = model(data, return_embedding=True)   # (B, emb_dim)
+            # Batch hard triplet loss
+            loss_triplet = batch_hard_triplet_loss(embeddings, target, args.triplet_margin)
+            loss = loss_ce + args.triplet_weight * loss_triplet
+            total_triplet += loss_triplet.item() * data.size(0)
 
         loss.backward()
         optimizer.step()
 
         total_loss += loss.item() * data.size(0)
+        total_ce += loss_ce.item() * data.size(0)
 
         if batch_idx % 10 == 0:
             print(f'Train Epoch: {epoch} [{batch_idx * len(data)}/{len(loader.dataset)} '
                   f'({100. * batch_idx / len(loader):.0f}%)]\tLoss: {loss.item():.6f}')
 
-    avg_loss = total_loss / len(loader.dataset)
-    # Khi dùng triplet, không có accuracy để tính, ta có thể bỏ qua hoặc in loss
-    if args.use_triplet:
-        print(f'Train Epoch: {epoch} - Average Triplet Loss: {avg_loss:.4f}')
-        return avg_loss, None   # không có accuracy
-    else:
-        acc = 100. * correct / total
-        print(f'Train Epoch: {epoch} - Average loss: {avg_loss:.4f}, Accuracy: {acc:.2f}%')
-        return avg_loss, acc
+    avg_loss = total_loss / total
+    avg_ce = total_ce / total
+    avg_triplet = total_triplet / total if args.use_triplet else 0.0
+    acc = 100. * correct / total
+    print(f'Train Epoch: {epoch} - Avg loss: {avg_loss:.4f}, CE: {avg_ce:.4f}, Triplet: {avg_triplet:.4f}, Accuracy: {acc:.2f}%')
+    return avg_loss, acc
+
+
+def batch_hard_triplet_loss(embeddings, labels, margin=1.0):
+    """Batch hard triplet loss."""
+    pairwise_dist = torch.cdist(embeddings, embeddings, p=2)  # (B, B)
+
+    loss = 0.0
+    num_triplets = 0
+
+    for i in range(len(labels)):
+        anchor_label = labels[i]
+        pos_mask = (labels == anchor_label) & (torch.arange(len(labels)) != i)
+        neg_mask = (labels != anchor_label)
+
+        if pos_mask.sum() == 0 or neg_mask.sum() == 0:
+            continue
+
+        # Hardest positive (xa nhất)
+        hardest_pos_dist = pairwise_dist[i][pos_mask].max()
+        # Hardest negative (gần nhất)
+        hardest_neg_dist = pairwise_dist[i][neg_mask].min()
+
+        loss += F.relu(hardest_pos_dist - hardest_neg_dist + margin)
+        num_triplets += 1
+
+    if num_triplets > 0:
+        loss = loss / num_triplets
+    return loss
 
 # -------------------------------
 # Hàm validation / test (luôn dùng classifier)
