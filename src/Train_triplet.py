@@ -10,7 +10,7 @@ from sklearn.metrics import accuracy_score, roc_auc_score, confusion_matrix, cla
 
 # Import data loader và model
 from data_loader_triplet import create_dataloaders   # đã được cập nhật với TripletBatchSampler
-from Fusion_inflate import FusionM                    # model đã có embedding head
+from Fusion_triplet import FusionM                    # model đã có embedding head
 
 # -------------------------------
 # Seed
