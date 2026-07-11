@@ -278,7 +278,7 @@ class FusionM(nn.Module):
     def __init__(self, num_classes=2, load_vit=True):
         super(FusionM, self).__init__()
         # --- Sử dụng timm thay vì pretrainedmodels ---
-        model_se = timm.create_model('se_resnet50', pretrained=True)
+        model_se = timm.create_model('seresnet50', pretrained=True)
         
         self.path = r'./model/vit_base_patch16_224_in21k.pth'  # Đường dẫn weight ViT pretrained
         self.load_true = load_vit
