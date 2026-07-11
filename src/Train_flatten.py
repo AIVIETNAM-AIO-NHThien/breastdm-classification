@@ -18,8 +18,8 @@ from tools import EarlyStopping
 
 # -------------------- CẤU HÌNH --------------------
 DATA_PATH = "/kaggle/working/dataset_formatted"
-BATCH_SIZE = 16
-EPOCHS = 100
+BATCH_SIZE = 32
+EPOCHS = 30
 LR = 0.01
 MOMENTUM = 0.9
 WEIGHT_DECAY = 0.01
@@ -27,7 +27,7 @@ SEED = 8
 PATIENCE = 20
 
 # GPU
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"   # thay "0" thành "0,1"
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("Using device:", device)
 
@@ -54,7 +54,7 @@ len_test = len(test_loader.dataset)
 print(f"Train: {len_train}, Val: {len_val}, Test: {len_test}")
 
 # -------------------- MODEL --------------------
-model = Fusion_flatten.FusionM(num_classes=num_classes, load_vit=False)
+model = Fusion_flatten.FusionM(num_classes=num_classes, load_vit=True)
 if torch.cuda.device_count() > 1:
     model = nn.DataParallel(model)
 model = model.to(device)
