@@ -275,7 +275,7 @@ class FCUUp(nn.Module):
 
 # -------------------- FusionM (SỬA ĐỂ DÙNG TIMM) --------------------
 class FusionM(nn.Module):
-    def __init__(self, num_classes=2, load_vit=True):
+    def __init__(self, num_classes=2, load_vit=False):
         super(FusionM, self).__init__()
         # --- Sử dụng timm thay vì pretrainedmodels ---
         model_se = timm.create_model('seresnet50', pretrained=True)
@@ -345,6 +345,6 @@ class FusionM(nn.Module):
 if __name__ == '__main__':
     # Test model
     a = torch.rand(2, 3, 224, 224)
-    model = FusionM(num_classes=2, load_vit=True)
+    model = FusionM(num_classes=2, load_vit=False)
     out = model(a)
     print(out.shape)  # Expected: torch.Size([2, 2])

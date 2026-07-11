@@ -54,7 +54,7 @@ len_test = len(test_loader.dataset)
 print(f"Train: {len_train}, Val: {len_val}, Test: {len_test}")
 
 # -------------------- MODEL --------------------
-model = Fusion_flatten.FusionM(num_classes=num_classes, load_vit=True)
+model = Fusion_flatten.FusionM(num_classes=num_classes, load_vit=False)
 if torch.cuda.device_count() > 1:
     model = nn.DataParallel(model)
 model = model.to(device)
