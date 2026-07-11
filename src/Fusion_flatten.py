@@ -1,12 +1,12 @@
-# fusionModels.py - 100% code tác giả (nguyên bản)
+# fusionModels.py - Sửa để dùng timm thay vì pretrainedmodels
 
 from functools import partial
-import pretrainedmodels.models as premodels
-from torch import nn
-import torch.nn.functional as F
-from VIT_model import *  # File VIT_model.py của tác giả
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 from collections import OrderedDict
+import timm  # Thay vì pretrainedmodels
+from VIT_model import *  # File VIT_model.py của tác giả
 
 # -------------------- Non-Local Block --------------------
 class NLBlockND(nn.Module):
@@ -273,12 +273,12 @@ class FCUUp(nn.Module):
         x_r = self.act(self.bn(self.conv_project(x_r)))
         return F.interpolate(x_r, size=(H * self.up_stride, W * self.up_stride))
 
-# -------------------- FusionM (100% nguyên bản tác giả) --------------------
+# -------------------- FusionM (SỬA ĐỂ DÙNG TIMM) --------------------
 class FusionM(nn.Module):
     def __init__(self, num_classes=2, load_vit=False):
         super(FusionM, self).__init__()
-        # SE-ResNet50 từ pretrainedmodels
-        model_se = premodels.se_resnet50()
+        # --- Sử dụng timm thay vì pretrainedmodels ---
+        model_se = timm.create_model('se_resnet50', pretrained=True)
         
         self.path = r'./model/vit_base_patch16_224_in21k.pth'  # Đường dẫn weight ViT pretrained
         self.load_true = load_vit
@@ -289,8 +289,14 @@ class FusionM(nn.Module):
         # Non-Local Block
         self.Nlblock = NLBlockND(in_channels=512)
         
-        # SE-ResNet50 layers
-        self.layer0 = model_se.layer0
+        # Tự định nghĩa layer0 (conv1 + bn1 + act1 + maxpool)
+        self.layer0 = nn.Sequential(
+            model_se.conv1,
+            model_se.bn1,
+            model_se.act1,
+            model_se.maxpool
+        )
+        # Các layer khác giữ nguyên
         self.layer1 = model_se.layer1
         self.layer2 = model_se.layer2
         self.layer3 = model_se.layer3
