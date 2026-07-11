@@ -1,4 +1,4 @@
-# fusionModels.py - Sửa để dùng timm thay vì pretrainedmodels
+# fusionModels.py - Sửa để dùng timm với model 'seresnet50'
 
 from functools import partial
 import torch
@@ -273,12 +273,12 @@ class FCUUp(nn.Module):
         x_r = self.act(self.bn(self.conv_project(x_r)))
         return F.interpolate(x_r, size=(H * self.up_stride, W * self.up_stride))
 
-# -------------------- FusionM (SỬA ĐỂ DÙNG TIMM) --------------------
+# -------------------- FusionM (SỬA TÊN MODEL THÀNH 'seresnet50') --------------------
 class FusionM(nn.Module):
     def __init__(self, num_classes=2, load_vit=False):
         super(FusionM, self).__init__()
-        # --- Sử dụng timm thay vì pretrainedmodels ---
-        model_se = timm.create_model('se_resnet50', pretrained=True)
+        # --- Sử dụng timm với model 'seresnet50' (chính xác cho SE-ResNet50) ---
+        model_se = timm.create_model('seresnet50', pretrained=True)
         
         self.path = r'./model/vit_base_patch16_224_in21k.pth'  # Đường dẫn weight ViT pretrained
         self.load_true = load_vit
