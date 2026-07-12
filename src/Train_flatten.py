@@ -27,7 +27,7 @@ SEED = 8
 PATIENCE = 20
 
 # Đường dẫn đến file pretrained ViT-12 (bạn đã tạo)
-VIT_PRETRAINED_PATH = "/kaggle/working/breastdm-classification/model/vit_base_patch16_224_in21k.pth"
+VIT_PRETRAINED_PATH = "/kaggle/working/model/vit_base_patch16_224_in21k.pth"
 # Nếu bạn muốn dùng load_vit=True (cơ chế cũ) thì set LOAD_VIT_FLAG=True, nhưng khuyên dùng VIT_PRETRAINED_PATH
 
 # GPU
@@ -170,7 +170,6 @@ if __name__ == "__main__":
             new_state_dict[k[7:]] = v
         else:
             new_state_dict[k] = v
-    
     # Tạo model mới không DataParallel để đánh giá
     eval_model = Fusion_flatten.FusionM(
         num_classes=num_classes,
