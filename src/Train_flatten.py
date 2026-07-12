@@ -17,8 +17,8 @@ import Fusion_flatten
 from tools import EarlyStopping
 
 # -------------------- CẤU HÌNH --------------------
-DATA_PATH = "/kaggle/working/dataset_formatted"
-BATCH_SIZE = 32
+DATA_PATH = "/kaggle/working/breastdm-classification/src/model/vit_base_patch16_224_in21k.pth"
+BATCH_SIZE = 64
 EPOCHS = 30
 LR = 0.01
 MOMENTUM = 0.9
