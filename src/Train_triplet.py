@@ -61,7 +61,7 @@ parser.add_argument('--triplet-weight', type=float, default=1.0,
 parser.add_argument('--embedding-dim', type=int, default=128,
                     help='Dimension of embedding for triplet loss')
 parser.add_argument('--eval-embedding', action='store_true', default=False,
-                    help='Evaluate val accuracy/AUC using k-NN on embeddings when only triple (expensive)')
+                    help='Evaluate val accuracy/AUC using SVM on embeddings when only triplet (expensive)')
 
 args = parser.parse_args()
 
@@ -90,7 +90,7 @@ train_loader, val_loader, test_loader = create_dataloaders(
     experiment=args.experiment,
     batch_size=args.batch_size,
     num_workers=args.num_workers,
-    use_triplet=(args.use_triplet or args.only_triplet)   # cần TripletBatchSampler nếu dùng triplet
+    use_triplet=(args.use_triplet or args.only_triplet)
 )
 
 print(f"Train samples: {len(train_loader.dataset)}")
@@ -166,12 +166,6 @@ def batch_semihard_triplet_loss(embeddings, labels, margin=1.0):
 # Hàm tính Sensitivity và Specificity từ confusion matrix
 # -------------------------------
 def calc_sens_spec(cm):
-    """cm: 2x2 confusion matrix [[TN, FP], [FN, TP]] hoặc [[TN, FP], [FN, TP]]"""
-    # Với binary classification, thường cm có dạng [[TN, FP], [FN, TP]]
-    # hoặc [[TP, FN], [FP, TN]] tùy vào thứ tự. Ta sẽ chuẩn hóa:
-    # Ta giả định cm trả về từ sklearn có thứ tự: [[TN, FP], [FN, TP]]
-    # (vì labels = ['Benign' (0), 'Malignant' (1)])
-    # Nên TN = cm[0,0], FP = cm[0,1], FN = cm[1,0], TP = cm[1,1]
     TN, FP = cm[0,0], cm[0,1]
     FN, TP = cm[1,0], cm[1,1]
     sensitivity = TP / (TP + FN) if (TP + FN) > 0 else 0.0
@@ -226,9 +220,9 @@ def evaluate(model, loader, criterion_ce, device, target_name='Val'):
     return avg_loss, acc, auc, sens, spec
 
 # -------------------------------
-# Hàm đánh giá bằng k‑NN trên embedding (dùng cho only_triplet)
+# Hàm đánh giá bằng SVM trên embedding (dùng cho only_triplet)
 # -------------------------------
-def evaluate_embedding_knn(model, train_loader, val_loader, device, n_neighbors=5):
+def evaluate_embedding_svm(model, train_loader, val_loader, device, kernel='rbf', C=1.0):
     model.eval()
     train_embs, train_labels = [], []
     val_embs, val_labels = [], []
@@ -248,17 +242,17 @@ def evaluate_embedding_knn(model, train_loader, val_loader, device, n_neighbors=
     X_val = np.concatenate(val_embs)
     y_val = np.concatenate(val_labels)
 
-    knn = KNeighborsClassifier(n_neighbors=n_neighbors)
-    knn.fit(X_train, y_train)
-    y_pred = knn.predict(X_val)
-    y_proba = knn.predict_proba(X_val)[:, 1]
+    clf = SVC(kernel=kernel, C=C, probability=True, random_state=42)
+    clf.fit(X_train, y_train)
+    y_pred = clf.predict(X_val)
+    y_proba = clf.predict_proba(X_val)[:, 1]
 
     acc = accuracy_score(y_val, y_pred)
     auc = roc_auc_score(y_val, y_proba)
     cm = confusion_matrix(y_val, y_pred)
     sens, spec = calc_sens_spec(cm)
 
-    print(f'k-NN (k={n_neighbors}) on Val: Acc: {acc:.4f}, AUC: {auc:.4f}, Sens: {sens:.4f}, Spec: {spec:.4f}')
+    print(f'SVM (kernel={kernel}, C={C}) on Val: Acc: {acc:.4f}, AUC: {auc:.4f}, Sens: {sens:.4f}, Spec: {spec:.4f}')
     return acc * 100, auc, sens, spec
 
 # -------------------------------
@@ -277,12 +271,10 @@ def train_one_epoch(epoch, model, loader, optimizer, criterion_ce, criterion_tri
         optimizer.zero_grad()
 
         if args.only_triplet:
-            # Chỉ dùng triplet, không CE
             embeddings = model(data, return_embedding=True)
             loss = batch_semihard_triplet_loss(embeddings, target, args.triplet_margin)
             total_triplet += loss.item() * data.size(0)
         else:
-            # Luôn có logits từ classifier
             logits = model(data)
             loss_ce = criterion_ce(logits, target)
             _, pred = logits.max(1)
@@ -311,7 +303,7 @@ def train_one_epoch(epoch, model, loader, optimizer, criterion_ce, criterion_tri
 
     if args.only_triplet:
         print(f'Train Epoch: {epoch} - Avg loss: {avg_loss:.4f}, Triplet: {avg_triplet:.4f}')
-        return avg_loss, None   # không có accuracy
+        return avg_loss, None
     else:
         acc = 100. * correct / total
         print(f'Train Epoch: {epoch} - Avg loss: {avg_loss:.4f}, CE: {avg_ce:.4f}, Triplet: {avg_triplet:.4f}, Accuracy: {acc:.2f}%')
@@ -331,11 +323,11 @@ for epoch in range(1, args.epochs + 1):
                                             criterion_ce, criterion_triplet, device, args)
 
     if args.only_triplet:
-        # Chế độ chỉ triplet: đánh giá bằng k‑NN trên embedding
         if args.eval_embedding:
-            val_acc, val_auc, val_sens, val_spec = evaluate_embedding_knn(model, train_loader, val_loader, device)
-            print(f'Val set (k-NN): Accuracy: {val_acc:.2f}%, AUC: {val_auc:.4f}, Sens: {val_sens:.4f}, Spec: {val_spec:.4f}')
-            # Lưu checkpoint dựa trên val_acc
+            val_acc, val_auc, val_sens, val_spec = evaluate_embedding_svm(
+                model, train_loader, val_loader, device, kernel='rbf', C=1.0
+            )
+            print(f'Val set (SVM): Accuracy: {val_acc:.2f}%, AUC: {val_auc:.4f}, Sens: {val_sens:.4f}, Spec: {val_spec:.4f}')
             if val_acc > best_val_acc:
                 best_val_acc = val_acc
                 best_epoch = epoch
@@ -344,7 +336,6 @@ for epoch in range(1, args.epochs + 1):
                 torch.save(state_dict, save_path)
                 print(f'Checkpoint saved to {save_path} (val acc: {val_acc:.2f}%)')
         else:
-            # Nếu không bật eval‑embedding, lưu checkpoint dựa trên train loss
             if train_loss < best_val_loss:
                 best_val_loss = train_loss
                 save_path = os.path.join(args.save_dir, f'best_model_triplet_only_{args.experiment}.pth')
@@ -352,7 +343,6 @@ for epoch in range(1, args.epochs + 1):
                 torch.save(state_dict, save_path)
                 print(f'Checkpoint saved (train loss: {train_loss:.4f})')
     else:
-        # Chế độ CE (có thể kết hợp triplet): đánh giá bình thường
         val_loss, val_acc, val_auc, val_sens, val_spec = evaluate(model, val_loader, criterion_ce, device, 'Val')
         print(f'Val set: Acc: {val_acc:.2f}%, AUC: {val_auc:.4f}, Sens: {val_sens:.4f}, Spec: {val_spec:.4f}')
         if val_acc > best_val_acc:
@@ -379,8 +369,8 @@ if args.only_triplet:
     model_test = model_test.to(device)
     if len(args.gpu.split(',')) > 1:
         model_test = torch.nn.DataParallel(model_test)
-    # Dùng SVM cho đánh giá cuối cùng (có thể đổi thành k‑NN nếu muốn)
-    def evaluate_final_svm(model, train_loader, test_loader, device):
+    
+    def evaluate_final_svm(model, train_loader, test_loader, device, kernel='rbf', C=1.0):
         model.eval()
         train_embs, train_labels = [], []
         test_embs, test_labels = [], []
@@ -397,7 +387,7 @@ if args.only_triplet:
         y_train = np.concatenate(train_labels)
         X_test = np.concatenate(test_embs)
         y_test = np.concatenate(test_labels)
-        clf = SVC(kernel='rbf', probability=True, random_state=42)
+        clf = SVC(kernel=kernel, C=C, probability=True, random_state=42)
         clf.fit(X_train, y_train)
         y_pred = clf.predict(X_test)
         y_proba = clf.predict_proba(X_test)[:, 1]
@@ -407,8 +397,11 @@ if args.only_triplet:
         sens, spec = calc_sens_spec(cm)
         print(f'Test set (SVM): Accuracy: {acc:.2f}%, AUC: {auc:.4f}, Sens: {sens:.4f}, Spec: {spec:.4f}')
         print(classification_report(y_test, y_pred, target_names=['Benign', 'Malignant'], digits=4))
+        print('Confusion Matrix:')
+        print(cm)
         return acc, auc
-    evaluate_final_svm(model_test, train_loader, test_loader, device)
+    
+    evaluate_final_svm(model_test, train_loader, test_loader, device, kernel='rbf', C=1.0)
 else:
     best_model_path = os.path.join(args.save_dir, f'best_model_ce_{args.experiment}.pth')
     if os.path.exists(best_model_path):
