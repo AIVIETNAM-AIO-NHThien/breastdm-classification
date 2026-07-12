@@ -9,6 +9,7 @@ import torch.optim as optim
 from torch.optim.lr_scheduler import StepLR
 from sklearn.metrics import accuracy_score, roc_auc_score, confusion_matrix, classification_report
 from sklearn.neighbors import KNeighborsClassifier
+from sklearn.svm import SVC
 
 # Import data loader và model
 from data_loader_triplet import create_dataloaders
@@ -128,11 +129,10 @@ optimizer = optim.SGD(model.parameters(),
 scheduler = StepLR(optimizer, step_size=10, gamma=0.1)
 
 # -------------------------------
-# Semi-hard triplet loss
+# Semi-hard triplet loss (dùng cho only_triplet)
 # -------------------------------
 def batch_semihard_triplet_loss(embeddings, labels, margin=1.0):
     pairwise_dist = torch.cdist(embeddings, embeddings, p=2)
-    # Bắt đầu bằng một tensor 0.0 thay vì float
     loss = torch.tensor(0.0, device=embeddings.device, dtype=embeddings.dtype)
     num_triplets = 0
     device = embeddings.device
@@ -153,19 +153,80 @@ def batch_semihard_triplet_loss(embeddings, labels, margin=1.0):
             continue
 
         hardest_semihard_dist = neg_dists[semi_hard_mask].min()
-        # F.relu trả về tensor, cộng dồn vào loss
         loss += F.relu(hardest_pos_dist - hardest_semihard_dist + margin)
         num_triplets += 1
 
     if num_triplets > 0:
         loss = loss / num_triplets
     else:
-        # Trường hợp không có triplet, tạo tensor 0 với requires_grad=True
         loss = torch.tensor(0.0, device=embeddings.device, requires_grad=True)
     return loss
 
 # -------------------------------
-# Hàm đánh giá bằng k-NN trên embedding (khi chỉ dùng triplet)
+# Hàm tính Sensitivity và Specificity từ confusion matrix
+# -------------------------------
+def calc_sens_spec(cm):
+    """cm: 2x2 confusion matrix [[TN, FP], [FN, TP]] hoặc [[TN, FP], [FN, TP]]"""
+    # Với binary classification, thường cm có dạng [[TN, FP], [FN, TP]]
+    # hoặc [[TP, FN], [FP, TN]] tùy vào thứ tự. Ta sẽ chuẩn hóa:
+    # Ta giả định cm trả về từ sklearn có thứ tự: [[TN, FP], [FN, TP]]
+    # (vì labels = ['Benign' (0), 'Malignant' (1)])
+    # Nên TN = cm[0,0], FP = cm[0,1], FN = cm[1,0], TP = cm[1,1]
+    TN, FP = cm[0,0], cm[0,1]
+    FN, TP = cm[1,0], cm[1,1]
+    sensitivity = TP / (TP + FN) if (TP + FN) > 0 else 0.0
+    specificity = TN / (TN + FP) if (TN + FP) > 0 else 0.0
+    return sensitivity, specificity
+
+# -------------------------------
+# Hàm đánh giá với classifier (CE hoặc CE+triplet)
+# -------------------------------
+def evaluate(model, loader, criterion_ce, device, target_name='Val'):
+    model.eval()
+    total_loss = 0.0
+    correct = 0
+    total = 0
+    all_preds = []
+    all_labels = []
+    all_probs = []
+
+    with torch.no_grad():
+        for data, target in loader:
+            data, target = data.to(device), target.to(device)
+            output = model(data)
+            loss = criterion_ce(output, target)
+
+            total_loss += loss.item() * data.size(0)
+            _, pred = output.max(1)
+            correct += pred.eq(target).sum().item()
+            total += target.size(0)
+
+            prob = torch.softmax(output, dim=1)[:, 1]
+            all_probs.append(prob.cpu().numpy())
+            all_preds.append(pred.cpu().numpy())
+            all_labels.append(target.cpu().numpy())
+
+    avg_loss = total_loss / total
+    acc = 100. * correct / total
+
+    all_labels = np.concatenate(all_labels)
+    all_preds = np.concatenate(all_preds)
+    all_probs = np.concatenate(all_probs)
+
+    auc = roc_auc_score(all_labels, all_probs)
+    cm = confusion_matrix(all_labels, all_preds)
+    sens, spec = calc_sens_spec(cm)
+
+    if target_name == 'Test':
+        print(classification_report(all_labels, all_preds, target_names=['Benign', 'Malignant'], digits=4))
+
+    print(f'{target_name} set: Average loss: {avg_loss:.4f}, Accuracy: {acc:.2f}%, AUC: {auc:.4f}, '
+          f'Sensitivity: {sens:.4f}, Specificity: {spec:.4f}')
+    print(cm)
+    return avg_loss, acc, auc, sens, spec
+
+# -------------------------------
+# Hàm đánh giá bằng k‑NN trên embedding (dùng cho only_triplet)
 # -------------------------------
 def evaluate_embedding_knn(model, train_loader, val_loader, device, n_neighbors=5):
     model.eval()
@@ -194,7 +255,11 @@ def evaluate_embedding_knn(model, train_loader, val_loader, device, n_neighbors=
 
     acc = accuracy_score(y_val, y_pred)
     auc = roc_auc_score(y_val, y_proba)
-    return acc * 100, auc
+    cm = confusion_matrix(y_val, y_pred)
+    sens, spec = calc_sens_spec(cm)
+
+    print(f'k-NN (k={n_neighbors}) on Val: Acc: {acc:.4f}, AUC: {auc:.4f}, Sens: {sens:.4f}, Spec: {spec:.4f}')
+    return acc * 100, auc, sens, spec
 
 # -------------------------------
 # Hàm huấn luyện một epoch
@@ -253,48 +318,6 @@ def train_one_epoch(epoch, model, loader, optimizer, criterion_ce, criterion_tri
         return avg_loss, acc
 
 # -------------------------------
-# Hàm validation / test (dùng classifier)
-# -------------------------------
-def evaluate(model, loader, criterion_ce, device, target_name='Val'):
-    model.eval()
-    total_loss = 0.0
-    correct = 0
-    total = 0
-    all_preds = []
-    all_labels = []
-    all_probs = []
-
-    with torch.no_grad():
-        for data, target in loader:
-            data, target = data.to(device), target.to(device)
-            output = model(data)
-            loss = criterion_ce(output, target)
-
-            total_loss += loss.item() * data.size(0)
-            _, pred = output.max(1)
-            correct += pred.eq(target).sum().item()
-            total += target.size(0)
-
-            prob = torch.softmax(output, dim=1)[:, 1]
-            all_probs.append(prob.cpu().numpy())
-            all_preds.append(pred.cpu().numpy())
-            all_labels.append(target.cpu().numpy())
-
-    avg_loss = total_loss / total
-    acc = 100. * correct / total
-
-    all_labels = np.concatenate(all_labels)
-    all_preds = np.concatenate(all_preds)
-    all_probs = np.concatenate(all_probs)
-
-    auc = roc_auc_score(all_labels, all_probs)
-    if target_name == 'Test':
-        print(classification_report(all_labels, all_preds, target_names=['Benign', 'Malignant'], digits=4))
-
-    print(f'{target_name} set: Average loss: {avg_loss:.4f}, Accuracy: {acc:.2f}%, AUC: {auc:.4f}')
-    return avg_loss, acc, auc
-
-# -------------------------------
 # Vòng lặp chính
 # -------------------------------
 best_val_acc = 0.0
@@ -308,10 +331,10 @@ for epoch in range(1, args.epochs + 1):
                                             criterion_ce, criterion_triplet, device, args)
 
     if args.only_triplet:
-        # Chế độ chỉ triplet: đánh giá bằng k-NN trên embedding nếu được yêu cầu
+        # Chế độ chỉ triplet: đánh giá bằng k‑NN trên embedding
         if args.eval_embedding:
-            val_acc, val_auc = evaluate_embedding_knn(model, train_loader, val_loader, device)
-            print(f'Val set (k-NN): Accuracy: {val_acc:.2f}%, AUC: {val_auc:.4f}')
+            val_acc, val_auc, val_sens, val_spec = evaluate_embedding_knn(model, train_loader, val_loader, device)
+            print(f'Val set (k-NN): Accuracy: {val_acc:.2f}%, AUC: {val_auc:.4f}, Sens: {val_sens:.4f}, Spec: {val_spec:.4f}')
             # Lưu checkpoint dựa trên val_acc
             if val_acc > best_val_acc:
                 best_val_acc = val_acc
@@ -321,7 +344,7 @@ for epoch in range(1, args.epochs + 1):
                 torch.save(state_dict, save_path)
                 print(f'Checkpoint saved to {save_path} (val acc: {val_acc:.2f}%)')
         else:
-            # Nếu không bật eval-embedding, lưu checkpoint dựa trên train loss
+            # Nếu không bật eval‑embedding, lưu checkpoint dựa trên train loss
             if train_loss < best_val_loss:
                 best_val_loss = train_loss
                 save_path = os.path.join(args.save_dir, f'best_model_triplet_only_{args.experiment}.pth')
@@ -330,7 +353,8 @@ for epoch in range(1, args.epochs + 1):
                 print(f'Checkpoint saved (train loss: {train_loss:.4f})')
     else:
         # Chế độ CE (có thể kết hợp triplet): đánh giá bình thường
-        val_loss, val_acc, val_auc = evaluate(model, val_loader, criterion_ce, device, 'Val')
+        val_loss, val_acc, val_auc, val_sens, val_spec = evaluate(model, val_loader, criterion_ce, device, 'Val')
+        print(f'Val set: Acc: {val_acc:.2f}%, AUC: {val_auc:.4f}, Sens: {val_sens:.4f}, Spec: {val_spec:.4f}')
         if val_acc > best_val_acc:
             best_val_acc = val_acc
             best_epoch = epoch
@@ -355,8 +379,7 @@ if args.only_triplet:
     model_test = model_test.to(device)
     if len(args.gpu.split(',')) > 1:
         model_test = torch.nn.DataParallel(model_test)
-    # Dùng SVM cho đánh giá cuối cùng (có thể đổi thành k-NN nếu muốn)
-    from sklearn.svm import SVC
+    # Dùng SVM cho đánh giá cuối cùng (có thể đổi thành k‑NN nếu muốn)
     def evaluate_final_svm(model, train_loader, test_loader, device):
         model.eval()
         train_embs, train_labels = [], []
@@ -380,7 +403,9 @@ if args.only_triplet:
         y_proba = clf.predict_proba(X_test)[:, 1]
         acc = accuracy_score(y_test, y_pred) * 100
         auc = roc_auc_score(y_test, y_proba)
-        print(f'Test set (SVM): Accuracy: {acc:.2f}%, AUC: {auc:.4f}')
+        cm = confusion_matrix(y_test, y_pred)
+        sens, spec = calc_sens_spec(cm)
+        print(f'Test set (SVM): Accuracy: {acc:.2f}%, AUC: {auc:.4f}, Sens: {sens:.4f}, Spec: {spec:.4f}')
         print(classification_report(y_test, y_pred, target_names=['Benign', 'Malignant'], digits=4))
         return acc, auc
     evaluate_final_svm(model_test, train_loader, test_loader, device)
