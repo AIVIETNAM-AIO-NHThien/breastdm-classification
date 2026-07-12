@@ -200,7 +200,7 @@ class FCUUp(nn.Module):
 
 # -------------------- FusionM (sửa lỗi shape và contiguous) --------------------
 class FusionM(nn.Module):
-    def __init__(self, num_classes=2, load_vit=False):
+    def __init__(self, num_classes=2, load_vit=False, vit_pretrained_path=None):
         super(FusionM, self).__init__()
         # CNN branch (SENet50 từ timm)
         model_se = timm.create_model('seresnet50', pretrained=True)
@@ -215,7 +215,7 @@ class FusionM(nn.Module):
         self.layer3 = model_se.layer3  # giữ nhưng không dùng
 
         # ViT branch
-        self.vit = VisionTransformer_base()
+        self.vit = VisionTransformer_base()  # depth=7
         self.fcuup = FCUUp(inplanes=768, outplanes=512, up_stride=2)
 
         self.Nlblock = NLBlockND(in_channels=512)
@@ -224,7 +224,58 @@ class FusionM(nn.Module):
 
         # Biến tương thích code cũ
         self.load_true = load_vit
-        self.path = None
+        self.path = vit_pretrained_path
+
+        # Nếu có đường dẫn pretrained ViT, load vào
+        if vit_pretrained_path is not None:
+            self.load_vit_weights_from_12(vit_pretrained_path)
+        elif load_vit:
+            # Nếu load_vit=True nhưng không có đường dẫn, thử load từ self.path (cũ)
+            if hasattr(self, 'path') and self.path is not None:
+                self.load_vit_weights_from_12(self.path)
+            else:
+                print("Warning: load_vit=True but no pretrained path provided. ViT will be randomly initialized.")
+
+    def load_vit_weights_from_12(self, vit12_weights_path):
+        """
+        Load pretrained ViT-12 weights, trích xuất 7 block đầu, 
+        và gán vào self.vit (ViT-7).
+        """
+        print(f"Loading ViT-12 pretrained weights from {vit12_weights_path} ...")
+        # 1. Load pretrained ViT-12 state_dict
+        vit12_dict = torch.load(vit12_weights_path, map_location='cpu')
+        
+        # 2. Lấy state_dict của ViT-7 (self.vit)
+        vit7_dict = self.vit.state_dict()
+        
+        # 3. Lọc các key của 7 block đầu (blocks.0 đến blocks.6)
+        # và các key khác (patch_embed, cls_token, pos_embed, norm)
+        new_dict = {}
+        for k, v in vit12_dict.items():
+            # Bỏ qua head (không dùng)
+            if k.startswith('head'):
+                continue
+            # Chỉ lấy các key thuộc 7 block đầu
+            if k.startswith('blocks.'):
+                block_idx = int(k.split('.')[1])
+                if block_idx >= 7:
+                    continue
+            # Chỉ lấy các key có trong vit7_dict và shape khớp
+            if k in vit7_dict and v.shape == vit7_dict[k].shape:
+                new_dict[k] = v
+            elif k in vit7_dict and v.shape != vit7_dict[k].shape:
+                print(f"Shape mismatch for {k}: pretrained {v.shape} vs model {vit7_dict[k].shape}. Skipping.")
+        
+        # 4. Load vào self.vit (cho phép thiếu key)
+        self.vit.load_state_dict(new_dict, strict=False)
+        print("Loaded ViT-7 weights extracted from ViT-12 pretrained model.")
+        
+        # Kiểm tra số lượng key đã load
+        loaded_keys = set(new_dict.keys())
+        total_keys = set(vit7_dict.keys())
+        missing = total_keys - loaded_keys
+        if missing:
+            print(f"Missing keys in ViT-7 after loading: {missing}")
 
     def forward(self, x):
         # ---- ViT branch ----

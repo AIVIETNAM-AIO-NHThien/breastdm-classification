@@ -26,8 +26,12 @@ WEIGHT_DECAY = 0.01
 SEED = 8
 PATIENCE = 20
 
+# Đường dẫn đến file pretrained ViT-12 (bạn đã tạo)
+VIT_PRETRAINED_PATH = "/kaggle/working/breastdm-classification/model/vit_base_patch16_224_in21k.pth"
+# Nếu bạn muốn dùng load_vit=True (cơ chế cũ) thì set LOAD_VIT_FLAG=True, nhưng khuyên dùng VIT_PRETRAINED_PATH
+
 # GPU
-os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"   # thay "0" thành "0,1"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"   # có thể set "0" nếu gặp lỗi
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("Using device:", device)
 
@@ -54,7 +58,11 @@ len_test = len(test_loader.dataset)
 print(f"Train: {len_train}, Val: {len_val}, Test: {len_test}")
 
 # -------------------- MODEL --------------------
-model = Fusion_flatten.FusionM(num_classes=num_classes, load_vit=False)
+model = Fusion_flatten.FusionM(
+    num_classes=num_classes,
+    load_vit=False,                      # Không dùng cơ chế cũ
+    vit_pretrained_path=VIT_PRETRAINED_PATH  # Đường dẫn đến file pretrained ViT-12
+)
 if torch.cuda.device_count() > 1:
     model = nn.DataParallel(model)
 model = model.to(device)
@@ -153,6 +161,25 @@ if __name__ == "__main__":
     print(f"Best Val AUC: {best_auc:.4f}")
     
     # Đánh giá trên test với model tốt nhất
-    model.load_state_dict(torch.load("best_fusion_model.pth"))
-    print("\n=== Final Test Evaluation ===")
-    test_acc, test_loss, test_auc = evaluate(model, test_loader, len_test, name='Test')
+    # Load model tốt nhất
+    state_dict = torch.load("best_fusion_model.pth", map_location=device)
+    # Nếu model được lưu với DataParallel, có thể có prefix "module."
+    new_state_dict = {}
+    for k, v in state_dict.items():
+        if k.startswith("module."):
+            new_state_dict[k[7:]] = v
+        else:
+            new_state_dict[k] = v
+    
+    # Tạo model mới không DataParallel để đánh giá
+    eval_model = Fusion_flatten.FusionM(
+        num_classes=num_classes,
+        load_vit=False,
+        vit_pretrained_path=VIT_PRETRAINED_PATH  # Có thể không cần vì đã có weights
+    )
+    eval_model.load_state_dict(new_state_dict, strict=True)
+    eval_model = eval_model.to(device)
+    eval_model.eval()
+    
+    # Đánh giá
+    test_acc, test_loss, test_auc = evaluate(eval_model, test_loader, len_test, name='Test')
