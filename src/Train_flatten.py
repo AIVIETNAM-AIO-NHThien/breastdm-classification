@@ -17,7 +17,7 @@ import Fusion_flatten
 from tools import EarlyStopping
 
 # -------------------- CẤU HÌNH --------------------
-DATA_PATH = "/kaggle/working/breastdm-classification/src/model/vit_base_patch16_224_in21k.pth"
+DATA_PATH = "/kaggle/working/dataset_formatted"
 BATCH_SIZE = 64
 EPOCHS = 30
 LR = 0.01
@@ -27,7 +27,7 @@ SEED = 8
 PATIENCE = 20
 
 # Đường dẫn đến file pretrained ViT-12 (bạn đã tạo)
-VIT_PRETRAINED_PATH = "/kaggle/working/model/vit_base_patch16_224_in21k.pth"
+VIT_PRETRAINED_PATH = "/kaggle/working/breastdm-classification/src/model/vit_base_patch16_224_in21k.pth"
 # Nếu bạn muốn dùng load_vit=True (cơ chế cũ) thì set LOAD_VIT_FLAG=True, nhưng khuyên dùng VIT_PRETRAINED_PATH
 
 # GPU
