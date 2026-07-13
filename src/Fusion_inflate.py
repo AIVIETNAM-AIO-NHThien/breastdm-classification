@@ -1,13 +1,14 @@
 import os
 import ssl
 from functools import partial
+from collections import OrderedDict
 
 import timm
 import torch
 from torch import nn
 import torch.nn.functional as F
 
-# File này được giả sử chứa các lớp PatchEmbed, Block, OrderedDict (nếu dùng trong VisionTransformer_base)
+# File này chứa các lớp PatchEmbed, Block, OrderedDict (nếu dùng trong VisionTransformer_base)
 from VIT_model import *
 
 
@@ -211,11 +212,12 @@ class FCUUp(nn.Module):
 
 # ======================== Main Fusion Model (LG‑CAFN) ========================
 class FusionM(nn.Module):
-    def __init__(self, num_classes=2, in_c=9, load_vit=False):
+    def __init__(self, num_classes=2, in_c=9, load_vit=False, vit_path=None):
         super(FusionM, self).__init__()
         self.in_c = in_c
         self.load_vit_flag = load_vit
-        self.path = r'./model/vit_base_patch16_224_in21k.pth'
+        # Sử dụng vit_path nếu được truyền, ngược lại dùng mặc định
+        self.path = vit_path if vit_path is not None else r'./model/vit_base_patch16_224_in21k.pth'
 
         # ----- ViT branch -----
         self.vit = VisionTransformer_base(
@@ -226,7 +228,6 @@ class FusionM(nn.Module):
             self._load_pretrained_vit()
 
         # ----- CNN branch (SE‑ResNet50) -----
-        import ssl
         ssl._create_default_https_context = ssl._create_unverified_context
         se_resnet = timm.create_model('seresnet50', pretrained=True)
 
@@ -331,9 +332,9 @@ class FusionM(nn.Module):
         fused = torch.cat((out1, out2), dim=1)    # (B, 1024, 12, 12)
 
         # Classifier
-        pooled = self.avgpool(fused)
-        pooled = pooled.view(pooled.size(0), -1)
-        logits = self.fc(pooled)
+        pooled = self.avgpool(fused)              # (B, 1024, 1, 1)
+        pooled = pooled.view(pooled.size(0), -1)  # (B, 1024)
+        logits = self.fc(pooled)                  # (B, num_classes)
         return logits
 
 
@@ -351,7 +352,7 @@ if __name__ == '__main__':
     out17 = model17(dummy17)
     print("Output shape:", out17.shape)
 
-    print("\nTesting with pretrained ViT weights (with inflation)...")
+    print("\nTesting with pretrained ViT weights...")
     model_pretrained = FusionM(num_classes=2, in_c=17, load_vit=True)
     out_pretrained = model_pretrained(dummy17)
     print("Output shape:", out_pretrained.shape)
