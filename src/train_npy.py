@@ -111,6 +111,20 @@ optimizer = optim.SGD(model.parameters(),
 scheduler = StepLR(optimizer, step_size=10, gamma=0.1)
 
 # -------------------------------
+# Hàm tính Sensitivity và Specificity
+# -------------------------------
+def calc_sens_spec(cm):
+    """
+    cm: confusion matrix 2x2
+    Thứ tự: [[TN, FP], [FN, TP]]
+    """
+    TN, FP = cm[0,0], cm[0,1]
+    FN, TP = cm[1,0], cm[1,1]
+    sensitivity = TP / (TP + FN) if (TP + FN) > 0 else 0.0
+    specificity = TN / (TN + FP) if (TN + FP) > 0 else 0.0
+    return sensitivity, specificity
+
+# -------------------------------
 # Hàm huấn luyện (có warmup + gradient clipping)
 # -------------------------------
 def train_one_epoch(epoch, model, loader, optimizer, criterion, device, args):
@@ -154,7 +168,7 @@ def train_one_epoch(epoch, model, loader, optimizer, criterion, device, args):
     return avg_loss, acc
 
 # -------------------------------
-# Hàm validation / test
+# Hàm validation / test (có in Sensitivity, Specificity)
 # -------------------------------
 def evaluate(model, loader, criterion, device, target_name='Val'):
     model.eval()
@@ -189,11 +203,17 @@ def evaluate(model, loader, criterion, device, target_name='Val'):
     all_probs = np.concatenate(all_probs)
 
     auc = roc_auc_score(all_labels, all_probs)
+    cm = confusion_matrix(all_labels, all_preds)
+    sens, spec = calc_sens_spec(cm)
+
     if target_name == 'Test':
         print(classification_report(all_labels, all_preds, target_names=['Benign', 'Malignant'], digits=4))
 
-    print(f'{target_name} set: Average loss: {avg_loss:.4f}, Accuracy: {acc:.2f}%, AUC: {auc:.4f}')
-    return avg_loss, acc, auc
+    print(f'{target_name} set: Average loss: {avg_loss:.4f}, Accuracy: {acc:.2f}%, AUC: {auc:.4f}, '
+          f'Sensitivity: {sens:.4f}, Specificity: {spec:.4f}')
+    print('Confusion Matrix:')
+    print(cm)
+    return avg_loss, acc, auc, sens, spec
 
 # -------------------------------
 # Vòng lặp chính
@@ -205,7 +225,7 @@ os.makedirs(args.save_dir, exist_ok=True)
 for epoch in range(1, args.epochs + 1):
     print(f'\n===== Epoch {epoch}/{args.epochs} =====')
     train_loss, train_acc = train_one_epoch(epoch, model, train_loader, optimizer, criterion, device, args)
-    val_loss, val_acc, val_auc = evaluate(model, val_loader, criterion, device, 'Val')
+    val_loss, val_acc, val_auc, val_sens, val_spec = evaluate(model, val_loader, criterion, device, 'Val')
 
     # Scheduler step sau warmup
     if epoch > args.warmup_epochs:
@@ -235,7 +255,7 @@ if os.path.exists(best_model_path):
     model_test = model_test.to(device)
     if len(args.gpu.split(',')) > 1:
         model_test = torch.nn.DataParallel(model_test)
-    test_loss, test_acc, test_auc = evaluate(model_test, test_loader, criterion, device, 'Test')
+    test_loss, test_acc, test_auc, test_sens, test_spec = evaluate(model_test, test_loader, criterion, device, 'Test')
 else:
     print('Best model not found, evaluating current model.')
-    test_loss, test_acc, test_auc = evaluate(model, test_loader, criterion, device, 'Test')
+    test_loss, test_acc, test_auc, test_sens, test_spec = evaluate(model, test_loader, criterion, device, 'Test')
