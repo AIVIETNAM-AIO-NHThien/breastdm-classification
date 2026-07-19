@@ -1,7 +1,7 @@
 from functools import partial
 import math
 
-import pretrainedmodels.models as premodels
+import timm
 from torch import nn
 import torch.nn.functional as F
 from VIT_model import *          # đảm bảo có các class: VisionTransformer_base, PatchEmbed, Block, ...
@@ -199,50 +199,46 @@ class FCUUp(nn.Module):
 
 class FusionM(nn.Module):
     def __init__(self, num_classes=2, in_c=9, load_vit=False, vit_path=None, img_size=96, patch_size=16):
-        """
-        Args:
-            num_classes: số lớp đầu ra
-            in_c: số kênh đầu vào (9 cho Exp-1, 17 cho Exp-2)
-            load_vit: có load pretrained ViT không
-            vit_path: đường dẫn file .pth của ViT (chỉ dùng khi load_vit=True)
-            img_size: kích thước ảnh (96)
-            patch_size: kích thước patch (16)
-        """
         super(FusionM, self).__init__()
 
-        # -------- SE-ResNet50 branch (CNN) --------
-        model_se = premodels.se_resnet50()
-        old_conv1 = model_se.layer0.conv1
-        new_conv1 = nn.Conv2d(
-            in_c, old_conv1.out_channels,
-            kernel_size=old_conv1.kernel_size,
-            stride=old_conv1.stride,
-            padding=old_conv1.padding,
-            bias=False
-        )
+        # ==================== SE‑ResNet50 branch (timm) ====================
+        model_se = timm.create_model('seresnet50', pretrained=True)
+        
+        # Sửa conv1
+        old_conv = model_se.conv1
+        new_conv = nn.Conv2d(in_c, old_conv.out_channels,
+                             kernel_size=old_conv.kernel_size,
+                             stride=old_conv.stride,
+                             padding=old_conv.padding, bias=False)
         with torch.no_grad():
-            new_conv1.weight[:, :3] = old_conv1.weight
-            mean_weight = old_conv1.weight.mean(dim=1, keepdim=True)
+            new_conv.weight[:, :3] = old_conv.weight
+            mean_w = old_conv.weight.mean(dim=1, keepdim=True)
             for i in range(3, in_c):
-                new_conv1.weight[:, i] = mean_weight[:, 0]
-        model_se.layer0.conv1 = new_conv1
+                new_conv.weight[:, i] = mean_w[:, 0]
+        model_se.conv1 = new_conv
 
-        self.layer0 = model_se.layer0
+        # Tạo layer0 tương tự pretrainedmodels
+        self.layer0 = nn.Sequential(
+            model_se.conv1,
+            model_se.bn1,
+            model_se.act1,
+            model_se.maxpool
+        )
         self.layer1 = model_se.layer1
         self.layer2 = model_se.layer2
-        self.layer3 = model_se.layer3  # không dùng, nhưng giữ để không lỗi
+        self.layer3 = model_se.layer3   # không dùng, chỉ giữ cấu trúc
 
-        # -------- ViT branch --------
+        # ==================== ViT branch ====================
         self.vit = VisionTransformer_base(img_size=img_size, patch_size=patch_size, in_c=in_c)
 
-        # -------- Non-local + Fusion --------
+        # ==================== Non‑local + Fusion ====================
         self.Nlblock = NLBlockND(in_channels=512)
         self.fcuup = FCUUp(inplanes=768, outplanes=512, up_stride=2)
         self.relu = nn.ReLU(inplace=True)
         self.avgpool = nn.AdaptiveAvgPool2d(1)
         self.fc = nn.Linear(1024, num_classes)
 
-        # -------- Load pretrained ViT nếu cần --------
+        # Load ViT pretrained (nếu có)
         if load_vit and vit_path is not None:
             self._load_pretrained_vit(vit_path)
         elif load_vit:
