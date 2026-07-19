@@ -42,7 +42,7 @@ class EarlyStopping:
 # -------------------------------
 # Seed
 # -------------------------------
-def set_seed(seed=5):
+def set_seed(seed=86):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -51,7 +51,7 @@ def set_seed(seed=5):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-set_seed(5)
+set_seed(86)
 
 # -------------------------------
 # Cấu hình dòng lệnh
