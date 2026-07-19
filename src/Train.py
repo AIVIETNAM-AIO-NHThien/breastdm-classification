@@ -42,7 +42,7 @@ class EarlyStopping:
 # -------------------------------
 # Seed
 # -------------------------------
-def set_seed(seed=8)
+def set_seed(seed=8):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
