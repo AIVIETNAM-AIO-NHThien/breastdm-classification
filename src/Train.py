@@ -4,13 +4,40 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.optim.lr_scheduler import StepLR
 from sklearn.metrics import accuracy_score, roc_auc_score, roc_curve, confusion_matrix, classification_report
 import sys
+import random
+import math
 
 from data_loader_original import create_dataloaders
 from Fusion_inflate import FusionM
-import random
+
+
+# -------------------------------
+# Early Stopping (giống tác giả)
+# -------------------------------
+class EarlyStopping:
+    def __init__(self, patience=20, verbose=True, delta=0):
+        self.patience = patience
+        self.verbose = verbose
+        self.delta = delta
+        self.counter = 0
+        self.best_loss = None
+        self.early_stop = False
+
+    def __call__(self, val_loss, model):
+        if self.best_loss is None:
+            self.best_loss = val_loss
+        elif val_loss > self.best_loss - self.delta:
+            self.counter += 1
+            if self.verbose:
+                print(f'EarlyStopping counter: {self.counter} out of {self.patience}')
+            if self.counter >= self.patience:
+                self.early_stop = True
+        else:
+            self.best_loss = val_loss
+            self.counter = 0
+
 
 # -------------------------------
 # Seed
@@ -95,32 +122,32 @@ if len(args.gpu.split(',')) > 1:
     model = torch.nn.DataParallel(model, device_ids=list(range(len(args.gpu.split(',')))))
 
 # -------------------------------
-# Loss, Optimizer, Scheduler
+# Loss, Optimizer (SGD không scheduler – tự cập nhật lr)
 # -------------------------------
 criterion = nn.CrossEntropyLoss()
 optimizer = optim.SGD(model.parameters(),
                       lr=args.lr,
                       momentum=args.momentum,
                       weight_decay=args.weight_decay)
-scheduler = StepLR(optimizer, step_size=10, gamma=0.1)
 
 # -------------------------------
-# Hàm tính Sensitivity và Specificity
+# Hàm tính Sensitivity và Specificity dùng Youden index (giống tác giả)
 # -------------------------------
-def calc_sens_spec(cm):
-    """
-    cm: 2x2 confusion matrix với thứ tự:
-        [[TN, FP],
-         [FN, TP]]
-    """
-    TN, FP = cm[0, 0], cm[0, 1]
-    FN, TP = cm[1, 0], cm[1, 1]
-    sensitivity = TP / (TP + FN) if (TP + FN) > 0 else 0.0
-    specificity = TN / (TN + FP) if (TN + FP) > 0 else 0.0
-    return sensitivity, specificity
+def calc_sens_spec_youden(all_labels, all_probs):
+    """Tính Sensitivity, Specificity tại ngưỡng tối ưu theo Youden index."""
+    fpr, tpr, thresholds = roc_curve(all_labels, all_probs)
+    J = tpr - fpr
+    idx = np.argmax(J)
+    opt_thresh = thresholds[idx]
+    sens = tpr[idx]
+    spec = 1 - fpr[idx]
+    # Tạo pred dựa trên ngưỡng tối ưu để tính confusion matrix
+    preds_opt = (all_probs >= opt_thresh).astype(int)
+    cm_opt = confusion_matrix(all_labels, preds_opt)
+    return sens, spec, opt_thresh, cm_opt
 
 # -------------------------------
-# Train
+# Train một epoch
 # -------------------------------
 def train_one_epoch(epoch, model, loader, optimizer, criterion, device):
     model.train()
@@ -150,7 +177,7 @@ def train_one_epoch(epoch, model, loader, optimizer, criterion, device):
     return avg_loss, acc
 
 # -------------------------------
-# Hàm đánh giá (có in Sens, Spec)
+# Hàm đánh giá (dùng Youden index để tính Sens/Spec)
 # -------------------------------
 def evaluate(model, loader, criterion, device, target_name='Val'):
     model.eval()
@@ -185,50 +212,68 @@ def evaluate(model, loader, criterion, device, target_name='Val'):
     all_probs = np.concatenate(all_probs)
 
     auc = roc_auc_score(all_labels, all_probs)
-    cm = confusion_matrix(all_labels, all_preds)
-    sens, spec = calc_sens_spec(cm)
+
+    # Tính Sensitivity / Specificity bằng Youden index (giống tác giả)
+    sens_youden, spec_youden, opt_thresh, cm_youden = calc_sens_spec_youden(all_labels, all_probs)
 
     if target_name == 'Test':
         print(classification_report(all_labels, all_preds, target_names=['Benign', 'Malignant'], digits=4))
 
     print(f'{target_name} set: Loss: {avg_loss:.4f}, Acc: {acc:.2f}%, AUC: {auc:.4f}, '
-          f'Sensitivity: {sens:.4f}, Specificity: {spec:.4f}')
-    print('Confusion Matrix:')
-    print(cm)
-    return avg_loss, acc, auc, sens, spec
+          f'Sensitivity: {sens_youden:.4f}, Specificity: {spec_youden:.4f}')
+    print(f'Optimal threshold (Youden): {opt_thresh:.4f}')
+    print('Confusion Matrix (at Youden threshold):')
+    print(cm_youden)
+
+    return avg_loss, acc, auc, sens_youden, spec_youden
 
 # -------------------------------
 # Vòng lặp chính
 # -------------------------------
-best_val_acc = 0.0
+best_auc = 0.0
 best_epoch = -1
 os.makedirs(args.save_dir, exist_ok=True)
 
+early_stopping = EarlyStopping(patience=20, verbose=True)
+
 for epoch in range(1, args.epochs + 1):
     print(f'\n===== Epoch {epoch}/{args.epochs} =====')
+
+    # Cập nhật learning rate theo công thức của tác giả
+    current_lr = max(args.lr * (0.1 ** (epoch // 10)), 1e-5)
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = current_lr
+    print(f'Learning rate: {current_lr:.6f}')
+
     train_loss, train_acc = train_one_epoch(epoch, model, train_loader, optimizer, criterion, device)
     val_loss, val_acc, val_auc, val_sens, val_spec = evaluate(model, val_loader, criterion, device, 'Val')
 
-    scheduler.step()
+    # Early stopping dựa trên validation loss
+    early_stopping(val_loss, model)
+    if early_stopping.early_stop:
+        print('Early stopping triggered.')
+        break
 
-    if val_acc > best_val_acc:
-        best_val_acc = val_acc
+    # Lưu model nếu AUC validation tốt nhất (giống tác giả lưu theo AUC)
+    if val_auc > best_auc:
+        best_auc = val_auc
         best_epoch = epoch
-        save_path = os.path.join(args.save_dir, f'best_model_experiment_{args.experiment}.pth')
+        save_path = os.path.join(args.save_dir, f'best_model_epoch_{epoch}_auc_{val_auc:.4f}.pth')
         if isinstance(model, torch.nn.DataParallel):
             state_dict = model.module.state_dict()
         else:
             state_dict = model.state_dict()
         torch.save(state_dict, save_path)
-        print(f'Checkpoint saved (val acc: {val_acc:.2f}%)')
+        print(f'Checkpoint saved (val AUC: {val_auc:.4f})')
 
-print(f'\nTraining finished. Best validation accuracy: {best_val_acc:.2f}% at epoch {best_epoch}')
+print(f'\nTraining finished. Best validation AUC: {best_auc:.4f} at epoch {best_epoch}')
 
 # -------------------------------
 # Đánh giá trên test với model tốt nhất
 # -------------------------------
 print('\nLoading best model for test evaluation...')
-best_model_path = os.path.join(args.save_dir, f'best_model_experiment_{args.experiment}.pth')
+# Tìm file model có AUC cao nhất đã lưu (có thể load trực tiếp best_epoch)
+best_model_path = os.path.join(args.save_dir, f'best_model_epoch_{best_epoch}_auc_{best_auc:.4f}.pth')
 if os.path.exists(best_model_path):
     model_test = FusionM(num_classes=args.num_class, in_c=in_channels, load_vit=False)
     model_test.load_state_dict(torch.load(best_model_path, map_location=device))
