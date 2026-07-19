@@ -198,15 +198,23 @@ class FCUUp(nn.Module):
 
 
 class FusionM(nn.Module):
-    def __init__(self, num_classes=2, load_vit=False, in_channels=9, img_size=96, patch_size=16):
+    def __init__(self, num_classes=2, in_c=9, load_vit=False, vit_path=None, img_size=96, patch_size=16):
+        """
+        Args:
+            num_classes: số lớp đầu ra
+            in_c: số kênh đầu vào (9 cho Exp-1, 17 cho Exp-2)
+            load_vit: có load pretrained ViT không
+            vit_path: đường dẫn file .pth của ViT (chỉ dùng khi load_vit=True)
+            img_size: kích thước ảnh (96)
+            patch_size: kích thước patch (16)
+        """
         super(FusionM, self).__init__()
 
         # -------- SE-ResNet50 branch (CNN) --------
         model_se = premodels.se_resnet50()
         old_conv1 = model_se.layer0.conv1
         new_conv1 = nn.Conv2d(
-            in_channels,
-            old_conv1.out_channels,
+            in_c, old_conv1.out_channels,
             kernel_size=old_conv1.kernel_size,
             stride=old_conv1.stride,
             padding=old_conv1.padding,
@@ -215,92 +223,92 @@ class FusionM(nn.Module):
         with torch.no_grad():
             new_conv1.weight[:, :3] = old_conv1.weight
             mean_weight = old_conv1.weight.mean(dim=1, keepdim=True)
-            for i in range(3, in_channels):
+            for i in range(3, in_c):
                 new_conv1.weight[:, i] = mean_weight[:, 0]
         model_se.layer0.conv1 = new_conv1
 
         self.layer0 = model_se.layer0
         self.layer1 = model_se.layer1
         self.layer2 = model_se.layer2
-        self.layer3 = model_se.layer3  # không dùng đến
+        self.layer3 = model_se.layer3  # không dùng, nhưng giữ để không lỗi
 
         # -------- ViT branch --------
-        self.path = r'./model/vit_base_patch16_224_in21k.pth'
-        self.load_true = load_vit
-        self.vit = VisionTransformer_base(img_size=img_size, patch_size=patch_size, in_c=in_channels)
+        self.vit = VisionTransformer_base(img_size=img_size, patch_size=patch_size, in_c=in_c)
 
-        # -------- Non-local & Fusion --------
+        # -------- Non-local + Fusion --------
         self.Nlblock = NLBlockND(in_channels=512)
         self.fcuup = FCUUp(inplanes=768, outplanes=512, up_stride=2)
         self.relu = nn.ReLU(inplace=True)
         self.avgpool = nn.AdaptiveAvgPool2d(1)
         self.fc = nn.Linear(1024, num_classes)
 
-        # Nếu cần load ViT ngay trong __init__ thì gọi hàm load riêng, nhưng ở đây giữ logic cũ (load trong forward)
-        # để tránh thay đổi quá nhiều. Bạn có thể chuyển ra ngoài nếu muốn.
+        # -------- Load pretrained ViT nếu cần --------
+        if load_vit and vit_path is not None:
+            self._load_pretrained_vit(vit_path)
+        elif load_vit:
+            print("Warning: load_vit=True nhưng vit_path không được chỉ định. Bỏ qua load pretrained ViT.")
 
-    def load_pretrained_vit(self):
-        if not self.load_true:
-            return
-        weight_dict = torch.load(self.path, map_location='cpu')
-        # Xóa head
-        del_keys = ['head.weight', 'head.bias']
-        for k in del_keys:
+    def _load_pretrained_vit(self, vit_path):
+        """Load pretrained ViT với xử lý số kênh và nội suy position embedding."""
+        weight_dict = torch.load(vit_path, map_location='cpu')
+        # Xóa head gốc (nếu có)
+        for k in ['head.weight', 'head.bias']:
             if k in weight_dict:
                 del weight_dict[k]
 
-        # Xử lý patch embedding: 3 -> 9 kênh
+        # 1. Xử lý patch embedding: 3 -> in_c kênh
         if 'patch_embed.proj.weight' in weight_dict:
             old_weight = weight_dict['patch_embed.proj.weight']  # (768, 3, 16, 16)
-            new_weight = torch.zeros(768, 9, 16, 16)
+            in_c = self.vit.patch_embed.proj.in_channels
+            new_weight = torch.zeros(768, in_c, 16, 16)
             new_weight[:, :3] = old_weight
-            mean_w = old_weight.mean(dim=1, keepdim=True)
-            for i in range(3, 9):
+            mean_w = old_weight.mean(dim=1, keepdim=True)  # (768, 1, 16, 16)
+            for i in range(3, in_c):
                 new_weight[:, i] = mean_w[:, 0]
             weight_dict['patch_embed.proj.weight'] = new_weight
 
-        # Xử lý position embedding: nội suy từ 14x14 -> HxW (ở đây 6x6)
+        # 2. Xử lý position embedding: nội suy về kích thước ảnh hiện tại
         if 'pos_embed' in weight_dict:
-            pos_embed_pretrained = weight_dict['pos_embed']  # (1, 197, 768) với img_size=224, patch=16
-            # Tách token CLS và position
-            cls_token_pos = pos_embed_pretrained[:, :1, :]          # (1, 1, 768)
-            pos_embed_patches = pos_embed_pretrained[:, 1:, :]      # (1, 196, 768)
-            num_patches_pret = pos_embed_patches.shape[1]           # 196
-            grid_size_pret = int(math.sqrt(num_patches_pret))       # 14
+            pos_embed_pretrained = weight_dict['pos_embed']  # (1, 197, 768) cho 224x224, patch=16
+            cls_token_pos = pos_embed_pretrained[:, :1, :]
+            pos_embed_patches = pos_embed_pretrained[:, 1:, :]  # (1, 196, 768)
+            num_patches_pret = pos_embed_patches.shape[1]
+            grid_size_pret = int(math.sqrt(num_patches_pret))  # 14
 
-            # Reshape về dạng 2D
-            pos_embed_patches = pos_embed_patches.reshape(1, grid_size_pret, grid_size_pret, -1).permute(0, 3, 1, 2)  # (1, 768, 14, 14)
-            # Nội suy về kích thước mới: grid_size_new = img_size // patch_size = 96 // 16 = 6
-            grid_size_new = self.vit.patch_embed.grid_size[0]       # thường là (H, W) của patch grid
-            pos_embed_patches_new = F.interpolate(pos_embed_patches, size=(grid_size_new, grid_size_new), mode='bicubic', align_corners=False)
-            # Về lại shape (1, num_patches_new, 768)
+            # Reshape về (1, 768, 14, 14)
+            pos_embed_patches = pos_embed_patches.reshape(1, grid_size_pret, grid_size_pret, -1).permute(0, 3, 1, 2)
+            # Grid hiện tại
+            grid_size_new = self.vit.patch_embed.grid_size[0]  # 6
+            # Nội suy
+            pos_embed_patches_new = F.interpolate(
+                pos_embed_patches, size=(grid_size_new, grid_size_new),
+                mode='bicubic', align_corners=False
+            )
+            # Về (1, num_patches_new, 768)
             pos_embed_patches_new = pos_embed_patches_new.permute(0, 2, 3, 1).reshape(1, -1, 768)
-            # Ghép với CLS token
-            new_pos_embed = torch.cat([cls_token_pos, pos_embed_patches_new], dim=1)  # (1, 1+36, 768)
+            # Ghép CLS
+            new_pos_embed = torch.cat([cls_token_pos, pos_embed_patches_new], dim=1)
             weight_dict['pos_embed'] = new_pos_embed
 
-        # Load với strict=False để bỏ qua các key không khớp (nếu có)
+        # Load state_dict
         self.vit.load_state_dict(weight_dict, strict=False)
-        self.load_true = False  # chỉ load một lần
+        print(f"Loaded pretrained ViT from {vit_path}")
 
     def forward(self, x):
-        if self.load_true:
-            self.load_pretrained_vit()
-
         # ViT forward
-        vit_x = self.vit(x)                         # (B, num_tokens+1, 768)
-        vit_x = self.fcuup(vit_x, H=self.vit.patch_embed.grid_size[0], W=self.vit.patch_embed.grid_size[1])
-        # FCUUp sẽ upsample lên (H*up_stride, W*up_stride) = 12x12
+        vit_x = self.vit(x)                                         # (B, num_tokens+1, 768)
+        H_grid, W_grid = self.vit.patch_embed.grid_size             # 6,6
+        vit_x = self.fcuup(vit_x, H_grid, W_grid)                   # (B, 512, 12, 12)
 
         # CNN forward
         x = self.layer0(x)
         x = self.layer1(x)
-        se_x = self.layer2(x)                       # (B, 512, 12, 12) với input 96x96
+        se_x = self.layer2(x)                                       # (B, 512, 12, 12) với input 96x96
 
         # Cross-attention fusion
-        x_path1 = self.Nlblock(se_x, vit_x)
-        x_path2 = self.Nlblock(vit_x, se_x)
-        out = torch.cat((x_path1, x_path2), 1)      # (B, 1024, 12, 12)
+        x_path1 = self.Nlblock(se_x, vit_x)   # CNN query, ViT key/value
+        x_path2 = self.Nlblock(vit_x, se_x)   # ViT query, CNN key/value
+        out = torch.cat((x_path1, x_path2), 1)  # (B, 1024, 12, 12)
 
         out = self.avgpool(out)
         out = out.view(out.size(0), -1)
@@ -309,9 +317,8 @@ class FusionM(nn.Module):
 
 
 if __name__ == '__main__':
-    # Test với input 9×96×96
+    # Test nhanh
     a = torch.rand(2, 9, 96, 96)
-    model = FusionM(num_classes=2, load_vit=False, in_channels=9, img_size=96, patch_size=16)
-    # Nếu muốn test load pretrained, set load_vit=True và đảm bảo file tồn tại
+    model = FusionM(num_classes=2, in_c=9, load_vit=False)
     out = model(a)
-    print(out.shape)  # Expected: torch.Size([2, 2])
+    print(out.shape)   # [2,2]
