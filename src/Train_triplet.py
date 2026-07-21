@@ -312,7 +312,7 @@ def train_one_epoch(epoch, model, loader, optimizer, criterion_ce, criterion_tri
 # -------------------------------
 # Vòng lặp chính
 # -------------------------------
-best_val_acc = 0.0
+best_val_auc = 0.0
 best_val_loss = float('inf')
 best_epoch = -1
 os.makedirs(args.save_dir, exist_ok=True)
@@ -328,13 +328,14 @@ for epoch in range(1, args.epochs + 1):
                 model, train_loader, val_loader, device, kernel='rbf', C=1.0
             )
             print(f'Val set (SVM): Accuracy: {val_acc:.2f}%, AUC: {val_auc:.4f}, Sens: {val_sens:.4f}, Spec: {val_spec:.4f}')
-            if val_acc > best_val_acc:
-                best_val_acc = val_acc
+            # Lưu model dựa trên val AUC
+            if val_auc > best_val_auc:
+                best_val_auc = val_auc
                 best_epoch = epoch
                 save_path = os.path.join(args.save_dir, f'best_model_triplet_only_{args.experiment}.pth')
                 state_dict = model.module.state_dict() if isinstance(model, torch.nn.DataParallel) else model.state_dict()
                 torch.save(state_dict, save_path)
-                print(f'Checkpoint saved to {save_path} (val acc: {val_acc:.2f}%)')
+                print(f'Checkpoint saved to {save_path} (val AUC: {val_auc:.4f})')
         else:
             if train_loss < best_val_loss:
                 best_val_loss = train_loss
@@ -345,17 +346,18 @@ for epoch in range(1, args.epochs + 1):
     else:
         val_loss, val_acc, val_auc, val_sens, val_spec = evaluate(model, val_loader, criterion_ce, device, 'Val')
         print(f'Val set: Acc: {val_acc:.2f}%, AUC: {val_auc:.4f}, Sens: {val_sens:.4f}, Spec: {val_spec:.4f}')
-        if val_acc > best_val_acc:
-            best_val_acc = val_acc
+        # Lưu model dựa trên val AUC
+        if val_auc > best_val_auc:
+            best_val_auc = val_auc
             best_epoch = epoch
             save_path = os.path.join(args.save_dir, f'best_model_ce_{args.experiment}.pth')
             state_dict = model.module.state_dict() if isinstance(model, torch.nn.DataParallel) else model.state_dict()
             torch.save(state_dict, save_path)
-            print(f'Checkpoint saved to {save_path} (val acc: {val_acc:.2f}%)')
+            print(f'Checkpoint saved to {save_path} (val AUC: {val_auc:.4f})')
 
     scheduler.step()
 
-print(f'\nTraining finished. Best validation accuracy: {best_val_acc:.2f}% at epoch {best_epoch}')
+print(f'\nTraining finished. Best validation AUC: {best_val_auc:.4f} at epoch {best_epoch}')
 
 # -------------------------------
 # Đánh giá cuối cùng trên tập test
