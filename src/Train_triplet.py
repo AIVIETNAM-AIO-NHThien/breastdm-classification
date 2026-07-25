@@ -6,14 +6,29 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from torch.optim.lr_scheduler import StepLR
-from sklearn.metrics import accuracy_score, roc_auc_score, confusion_matrix, classification_report
+from sklearn.metrics import accuracy_score, roc_auc_score, roc_curve, confusion_matrix, classification_report
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.svm import SVC
 
 # Import data loader và model
 from data_loader_triplet import create_dataloaders
 from Fusion_triplet import FusionM
+
+# -------------------------------
+# Hàm tính Sensitivity và Specificity dùng Youden index (giống Train.py)
+# -------------------------------
+def calc_sens_spec_youden(all_labels, all_probs):
+    """Tính Sensitivity, Specificity tại ngưỡng tối ưu theo Youden index."""
+    fpr, tpr, thresholds = roc_curve(all_labels, all_probs)
+    J = tpr - fpr
+    idx = np.argmax(J)
+    opt_thresh = thresholds[idx]
+    sens = tpr[idx]
+    spec = 1 - fpr[idx]
+    # Tạo pred dựa trên ngưỡng tối ưu để tính confusion matrix
+    preds_opt = (all_probs >= opt_thresh).astype(int)
+    cm_opt = confusion_matrix(all_labels, preds_opt)
+    return sens, spec, opt_thresh, cm_opt
 
 # -------------------------------
 # Seed
@@ -27,7 +42,7 @@ def set_seed(seed=8):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-set_seed(8)
+set_seed(8)  # đồng bộ với Train.py
 
 # -------------------------------
 # Cấu hình dòng lệnh
@@ -41,7 +56,7 @@ parser.add_argument('--experiment', type=str, default='Exp-1', choices=['Exp-1',
                     help='Experiment type')
 parser.add_argument('--data-root', type=str, required=True, help='root directory containing train/val/test folders')
 parser.add_argument('--epochs', type=int, default=100, help='number of training epochs')
-parser.add_argument('--lr', type=float, default=0.001, help='initial learning rate')
+parser.add_argument('--lr', type=float, default=0.01, help='initial learning rate')  # thay đổi mặc định thành 0.01
 parser.add_argument('--momentum', type=float, default=0.9, help='SGD momentum')
 parser.add_argument('--weight-decay', type=float, default=0.01, help='L2 regularization')
 parser.add_argument('--load-vit', action='store_true', default=True, help='load pretrained ViT weights')
@@ -116,20 +131,18 @@ if len(args.gpu.split(',')) > 1:
 # Loss functions
 # -------------------------------
 criterion_ce = nn.CrossEntropyLoss()
-criterion_triplet = nn.TripletMarginLoss(margin=args.triplet_margin, p=2.0)
+criterion_triplet = nn.TripletMarginLoss(margin=args.triplet_margin, p=2.0)  # vẫn khởi tạo nhưng không dùng
 
 # -------------------------------
-# Optimizer & Scheduler
+# Optimizer (SGD) - không có scheduler
 # -------------------------------
 optimizer = optim.SGD(model.parameters(),
                       lr=args.lr,
                       momentum=args.momentum,
                       weight_decay=args.weight_decay)
 
-scheduler = StepLR(optimizer, step_size=10, gamma=0.1)
-
 # -------------------------------
-# Semi-hard triplet loss (dùng cho only_triplet)
+# Semi-hard triplet loss (dùng cho only_triplet và combined)
 # -------------------------------
 def batch_semihard_triplet_loss(embeddings, labels, margin=1.0):
     pairwise_dist = torch.cdist(embeddings, embeddings, p=2)
@@ -163,17 +176,7 @@ def batch_semihard_triplet_loss(embeddings, labels, margin=1.0):
     return loss
 
 # -------------------------------
-# Hàm tính Sensitivity và Specificity từ confusion matrix
-# -------------------------------
-def calc_sens_spec(cm):
-    TN, FP = cm[0,0], cm[0,1]
-    FN, TP = cm[1,0], cm[1,1]
-    sensitivity = TP / (TP + FN) if (TP + FN) > 0 else 0.0
-    specificity = TN / (TN + FP) if (TN + FP) > 0 else 0.0
-    return sensitivity, specificity
-
-# -------------------------------
-# Hàm đánh giá với classifier (CE hoặc CE+triplet)
+# Hàm đánh giá (dùng Youden index) – dành cho CE và CE+Triplet
 # -------------------------------
 def evaluate(model, loader, criterion_ce, device, target_name='Val'):
     model.eval()
@@ -208,16 +211,20 @@ def evaluate(model, loader, criterion_ce, device, target_name='Val'):
     all_probs = np.concatenate(all_probs)
 
     auc = roc_auc_score(all_labels, all_probs)
-    cm = confusion_matrix(all_labels, all_preds)
-    sens, spec = calc_sens_spec(cm)
+
+    # Tính Sensitivity / Specificity bằng Youden index 
+    sens_youden, spec_youden, opt_thresh, cm_youden = calc_sens_spec_youden(all_labels, all_probs)
 
     if target_name == 'Test':
         print(classification_report(all_labels, all_preds, target_names=['Benign', 'Malignant'], digits=4))
 
-    print(f'{target_name} set: Average loss: {avg_loss:.4f}, Accuracy: {acc:.2f}%, AUC: {auc:.4f}, '
-          f'Sensitivity: {sens:.4f}, Specificity: {spec:.4f}')
-    print(cm)
-    return avg_loss, acc, auc, sens, spec
+    print(f'{target_name} set: Loss: {avg_loss:.4f}, Acc: {acc:.2f}%, AUC: {auc:.4f}, '
+          f'Sensitivity: {sens_youden:.4f}, Specificity: {spec_youden:.4f}')
+    print(f'Optimal threshold (Youden): {opt_thresh:.4f}')
+    print('Confusion Matrix (at Youden threshold):')
+    print(cm_youden)
+
+    return avg_loss, acc, auc, sens_youden, spec_youden
 
 # -------------------------------
 # Hàm đánh giá bằng SVM trên embedding (dùng cho only_triplet)
@@ -250,9 +257,13 @@ def evaluate_embedding_svm(model, train_loader, val_loader, device, kernel='rbf'
     acc = accuracy_score(y_val, y_pred)
     auc = roc_auc_score(y_val, y_proba)
     cm = confusion_matrix(y_val, y_pred)
-    sens, spec = calc_sens_spec(cm)
+    # Tính Sens/Spec từ confusion matrix (không dùng Youden vì không có logits)
+    TN, FP = cm[0,0], cm[0,1]
+    FN, TP = cm[1,0], cm[1,1]
+    sens = TP / (TP + FN) if (TP + FN) > 0 else 0.0
+    spec = TN / (TN + FP) if (TN + FP) > 0 else 0.0
 
-    print(f'SVM (kernel={kernel}, C={C}) on Val: Acc: {acc:.4f}, AUC: {auc:.4f}, Sens: {sens:.4f}, Spec: {spec:.4f}')
+    print(f'SVM (kernel={kernel}, C={C}) on Val: Acc: {acc*100:.2f}%, AUC: {auc:.4f}, Sens: {sens:.4f}, Spec: {spec:.4f}')
     return acc * 100, auc, sens, spec
 
 # -------------------------------
@@ -313,12 +324,18 @@ def train_one_epoch(epoch, model, loader, optimizer, criterion_ce, criterion_tri
 # Vòng lặp chính
 # -------------------------------
 best_val_auc = 0.0
-best_val_loss = float('inf')
 best_epoch = -1
 os.makedirs(args.save_dir, exist_ok=True)
 
 for epoch in range(1, args.epochs + 1):
     print(f'\n===== Epoch {epoch}/{args.epochs} =====')
+
+    # Cập nhật learning rate theo công thức của Train.py
+    current_lr = max(args.lr * (0.1 ** (epoch // 10)), 1e-5)
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = current_lr
+    print(f'Learning rate: {current_lr:.6f}')
+
     train_loss, train_acc = train_one_epoch(epoch, model, train_loader, optimizer,
                                             criterion_ce, criterion_triplet, device, args)
 
@@ -328,7 +345,6 @@ for epoch in range(1, args.epochs + 1):
                 model, train_loader, val_loader, device, kernel='rbf', C=1.0
             )
             print(f'Val set (SVM): Accuracy: {val_acc:.2f}%, AUC: {val_auc:.4f}, Sens: {val_sens:.4f}, Spec: {val_spec:.4f}')
-            # Lưu model dựa trên val AUC
             if val_auc > best_val_auc:
                 best_val_auc = val_auc
                 best_epoch = epoch
@@ -337,15 +353,16 @@ for epoch in range(1, args.epochs + 1):
                 torch.save(state_dict, save_path)
                 print(f'Checkpoint saved to {save_path} (val AUC: {val_auc:.4f})')
         else:
-            if train_loss < best_val_loss:
+            # Nếu không đánh giá, chỉ lưu theo train loss (tạm thời)
+            if train_loss < best_val_loss:  # cần định nghĩa best_val_loss ban đầu
                 best_val_loss = train_loss
                 save_path = os.path.join(args.save_dir, f'best_model_triplet_only_{args.experiment}.pth')
                 state_dict = model.module.state_dict() if isinstance(model, torch.nn.DataParallel) else model.state_dict()
                 torch.save(state_dict, save_path)
                 print(f'Checkpoint saved (train loss: {train_loss:.4f})')
     else:
+        # Đánh giá với Youden (đã được tích hợp trong hàm evaluate)
         val_loss, val_acc, val_auc, val_sens, val_spec = evaluate(model, val_loader, criterion_ce, device, 'Val')
-        print(f'Val set: Acc: {val_acc:.2f}%, AUC: {val_auc:.4f}, Sens: {val_sens:.4f}, Spec: {val_spec:.4f}')
         # Lưu model dựa trên val AUC
         if val_auc > best_val_auc:
             best_val_auc = val_auc
@@ -354,8 +371,6 @@ for epoch in range(1, args.epochs + 1):
             state_dict = model.module.state_dict() if isinstance(model, torch.nn.DataParallel) else model.state_dict()
             torch.save(state_dict, save_path)
             print(f'Checkpoint saved to {save_path} (val AUC: {val_auc:.4f})')
-
-    scheduler.step()
 
 print(f'\nTraining finished. Best validation AUC: {best_val_auc:.4f} at epoch {best_epoch}')
 
@@ -396,7 +411,10 @@ if args.only_triplet:
         acc = accuracy_score(y_test, y_pred) * 100
         auc = roc_auc_score(y_test, y_proba)
         cm = confusion_matrix(y_test, y_pred)
-        sens, spec = calc_sens_spec(cm)
+        TN, FP = cm[0,0], cm[0,1]
+        FN, TP = cm[1,0], cm[1,1]
+        sens = TP / (TP + FN) if (TP + FN) > 0 else 0.0
+        spec = TN / (TN + FP) if (TN + FP) > 0 else 0.0
         print(f'Test set (SVM): Accuracy: {acc:.2f}%, AUC: {auc:.4f}, Sens: {sens:.4f}, Spec: {spec:.4f}')
         print(classification_report(y_test, y_pred, target_names=['Benign', 'Malignant'], digits=4))
         print('Confusion Matrix:')
@@ -413,6 +431,7 @@ else:
         model_test = model_test.to(device)
         if len(args.gpu.split(',')) > 1:
             model_test = torch.nn.DataParallel(model_test)
+        # Đánh giá test với Youden
         evaluate(model_test, test_loader, criterion_ce, device, 'Test')
     else:
         print('Best model not found, evaluating current model.')
