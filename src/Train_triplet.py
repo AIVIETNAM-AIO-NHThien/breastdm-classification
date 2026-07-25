@@ -25,7 +25,6 @@ def calc_sens_spec_youden(all_labels, all_probs):
     opt_thresh = thresholds[idx]
     sens = tpr[idx]
     spec = 1 - fpr[idx]
-    # Tạo pred dựa trên ngưỡng tối ưu để tính confusion matrix
     preds_opt = (all_probs >= opt_thresh).astype(int)
     cm_opt = confusion_matrix(all_labels, preds_opt)
     return sens, spec, opt_thresh, cm_opt
@@ -42,7 +41,7 @@ def set_seed(seed=8):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-set_seed(8)  # đồng bộ với Train.py
+set_seed(8)
 
 # -------------------------------
 # Cấu hình dòng lệnh
@@ -56,7 +55,7 @@ parser.add_argument('--experiment', type=str, default='Exp-1', choices=['Exp-1',
                     help='Experiment type')
 parser.add_argument('--data-root', type=str, required=True, help='root directory containing train/val/test folders')
 parser.add_argument('--epochs', type=int, default=100, help='number of training epochs')
-parser.add_argument('--lr', type=float, default=0.01, help='initial learning rate')  # thay đổi mặc định thành 0.01
+parser.add_argument('--lr', type=float, default=0.01, help='initial learning rate')
 parser.add_argument('--momentum', type=float, default=0.9, help='SGD momentum')
 parser.add_argument('--weight-decay', type=float, default=0.01, help='L2 regularization')
 parser.add_argument('--load-vit', action='store_true', default=True, help='load pretrained ViT weights')
@@ -65,12 +64,13 @@ parser.add_argument('--vit-path', type=str, default='./model/vit_base_patch16_22
 parser.add_argument('--save-dir', type=str, default='checkpoints', help='directory to save model checkpoints')
 parser.add_argument('--num-workers', type=int, default=4, help='number of data loading workers')
 
-# Tham số cho triplet loss
+# Tham số cho triplet loss - cho phép nhiều giá trị margin
+parser.add_argument('--triplet-margin', type=float, nargs='+', default=[1.0],
+                    help='margin for triplet loss, can provide multiple values')
 parser.add_argument('--use-triplet', action='store_true', default=False,
                     help='Enable triplet loss (combined with CE if --only-triplet not set)')
 parser.add_argument('--only-triplet', action='store_true', default=False,
                     help='Use ONLY triplet loss (no cross-entropy)')
-parser.add_argument('--triplet-margin', type=float, default=1.0, help='margin for triplet loss')
 parser.add_argument('--triplet-weight', type=float, default=1.0,
                     help='Weight of triplet loss (when combined with CE)')
 parser.add_argument('--embedding-dim', type=int, default=128,
@@ -98,7 +98,7 @@ else:
     raise ValueError('Unknown experiment')
 
 # -------------------------------
-# Tạo DataLoader
+# Tạo DataLoader (dùng chung cho tất cả margin)
 # -------------------------------
 train_loader, val_loader, test_loader = create_dataloaders(
     root_dir=args.data_root,
@@ -113,38 +113,9 @@ print(f"Val samples:   {len(val_loader.dataset)}")
 print(f"Test samples:  {len(test_loader.dataset)}")
 
 # -------------------------------
-# Khởi tạo mô hình
+# Semi-hard triplet loss (không có default margin)
 # -------------------------------
-model = FusionM(num_classes=args.num_class,
-                in_c=in_channels,
-                load_vit=args.load_vit,
-                embedding_dim=args.embedding_dim)
-if args.load_vit:
-    model.path = args.vit_path
-
-model = model.to(device)
-
-if len(args.gpu.split(',')) > 1:
-    model = torch.nn.DataParallel(model, device_ids=list(range(len(args.gpu.split(',')))))
-
-# -------------------------------
-# Loss functions
-# -------------------------------
-criterion_ce = nn.CrossEntropyLoss()
-criterion_triplet = nn.TripletMarginLoss(margin=args.triplet_margin, p=2.0)  # vẫn khởi tạo nhưng không dùng
-
-# -------------------------------
-# Optimizer (SGD) - không có scheduler
-# -------------------------------
-optimizer = optim.SGD(model.parameters(),
-                      lr=args.lr,
-                      momentum=args.momentum,
-                      weight_decay=args.weight_decay)
-
-# -------------------------------
-# Semi-hard triplet loss (dùng cho only_triplet và combined)
-# -------------------------------
-def batch_semihard_triplet_loss(embeddings, labels, margin=0.5):
+def batch_semihard_triplet_loss(embeddings, labels, margin):
     pairwise_dist = torch.cdist(embeddings, embeddings, p=2)
     loss = torch.tensor(0.0, device=embeddings.device, dtype=embeddings.dtype)
     num_triplets = 0
@@ -211,8 +182,6 @@ def evaluate(model, loader, criterion_ce, device, target_name='Val'):
     all_probs = np.concatenate(all_probs)
 
     auc = roc_auc_score(all_labels, all_probs)
-
-    # Tính Sensitivity / Specificity bằng Youden index 
     sens_youden, spec_youden, opt_thresh, cm_youden = calc_sens_spec_youden(all_labels, all_probs)
 
     if target_name == 'Test':
@@ -257,7 +226,6 @@ def evaluate_embedding_svm(model, train_loader, val_loader, device, kernel='rbf'
     acc = accuracy_score(y_val, y_pred)
     auc = roc_auc_score(y_val, y_proba)
     cm = confusion_matrix(y_val, y_pred)
-    # Tính Sens/Spec từ confusion matrix (không dùng Youden vì không có logits)
     TN, FP = cm[0,0], cm[0,1]
     FN, TP = cm[1,0], cm[1,1]
     sens = TP / (TP + FN) if (TP + FN) > 0 else 0.0
@@ -267,9 +235,9 @@ def evaluate_embedding_svm(model, train_loader, val_loader, device, kernel='rbf'
     return acc * 100, auc, sens, spec
 
 # -------------------------------
-# Hàm huấn luyện một epoch
+# Hàm huấn luyện một epoch (nhận tham số margin)
 # -------------------------------
-def train_one_epoch(epoch, model, loader, optimizer, criterion_ce, criterion_triplet, device, args):
+def train_one_epoch(epoch, model, loader, optimizer, criterion_ce, criterion_triplet, device, args, margin):
     model.train()
     total_loss = 0.0
     total_ce = 0.0
@@ -283,7 +251,7 @@ def train_one_epoch(epoch, model, loader, optimizer, criterion_ce, criterion_tri
 
         if args.only_triplet:
             embeddings = model(data, return_embedding=True)
-            loss = batch_semihard_triplet_loss(embeddings, target, args.triplet_margin)
+            loss = batch_semihard_triplet_loss(embeddings, target, margin)
             total_triplet += loss.item() * data.size(0)
         else:
             logits = model(data)
@@ -296,7 +264,7 @@ def train_one_epoch(epoch, model, loader, optimizer, criterion_ce, criterion_tri
 
             if args.use_triplet:
                 embeddings = model(data, return_embedding=True)
-                loss_triplet = batch_semihard_triplet_loss(embeddings, target, args.triplet_margin)
+                loss_triplet = batch_semihard_triplet_loss(embeddings, target, margin)
                 loss = loss_ce + args.triplet_weight * loss_triplet
                 total_triplet += loss_triplet.item() * data.size(0)
 
@@ -321,118 +289,165 @@ def train_one_epoch(epoch, model, loader, optimizer, criterion_ce, criterion_tri
         return avg_loss, acc
 
 # -------------------------------
-# Vòng lặp chính
+# Hàm đánh giá cuối cùng bằng SVM cho test (chỉ dùng only_triplet)
 # -------------------------------
-best_val_auc = 0.0
-best_epoch = -1
-os.makedirs(args.save_dir, exist_ok=True)
+def evaluate_final_svm(model, train_loader, test_loader, device, kernel='rbf', C=1.0):
+    model.eval()
+    train_embs, train_labels = [], []
+    test_embs, test_labels = [], []
+    with torch.no_grad():
+        for data, target in train_loader:
+            emb = model(data.to(device), return_embedding=True).cpu().numpy()
+            train_embs.append(emb)
+            train_labels.append(target.numpy())
+        for data, target in test_loader:
+            emb = model(data.to(device), return_embedding=True).cpu().numpy()
+            test_embs.append(emb)
+            test_labels.append(target.numpy())
+    X_train = np.concatenate(train_embs)
+    y_train = np.concatenate(train_labels)
+    X_test = np.concatenate(test_embs)
+    y_test = np.concatenate(test_labels)
+    clf = SVC(kernel=kernel, C=C, probability=True, random_state=42)
+    clf.fit(X_train, y_train)
+    y_pred = clf.predict(X_test)
+    y_proba = clf.predict_proba(X_test)[:, 1]
+    acc = accuracy_score(y_test, y_pred) * 100
+    auc = roc_auc_score(y_test, y_proba)
+    cm = confusion_matrix(y_test, y_pred)
+    TN, FP = cm[0,0], cm[0,1]
+    FN, TP = cm[1,0], cm[1,1]
+    sens = TP / (TP + FN) if (TP + FN) > 0 else 0.0
+    spec = TN / (TN + FP) if (TN + FP) > 0 else 0.0
+    print(f'Test set (SVM): Accuracy: {acc:.2f}%, AUC: {auc:.4f}, Sens: {sens:.4f}, Spec: {spec:.4f}')
+    print(classification_report(y_test, y_pred, target_names=['Benign', 'Malignant'], digits=4))
+    print('Confusion Matrix:')
+    print(cm)
+    return acc, auc
 
-for epoch in range(1, args.epochs + 1):
-    print(f'\n===== Epoch {epoch}/{args.epochs} =====')
+# -------------------------------
+# Hàm huấn luyện cho một margin cụ thể
+# -------------------------------
+def train_with_margin(margin, args, train_loader, val_loader, test_loader, in_channels, device):
+    print(f"\n{'='*60}")
+    print(f"   BẮT ĐẦU HUẤN LUYỆN VỚI MARGIN = {margin}")
+    print('='*60)
 
-    # Cập nhật learning rate theo công thức của Train.py
-    current_lr = max(args.lr * (0.1 ** (epoch // 10)), 1e-5)
-    for param_group in optimizer.param_groups:
-        param_group['lr'] = current_lr
-    print(f'Learning rate: {current_lr:.6f}')
+    # Tạo thư mục lưu riêng cho margin này
+    save_dir = os.path.join(args.save_dir, f"margin_{margin}")
+    os.makedirs(save_dir, exist_ok=True)
 
-    train_loss, train_acc = train_one_epoch(epoch, model, train_loader, optimizer,
-                                            criterion_ce, criterion_triplet, device, args)
+    # Khởi tạo model mới
+    model = FusionM(num_classes=args.num_class,
+                    in_c=in_channels,
+                    load_vit=args.load_vit,
+                    embedding_dim=args.embedding_dim)
+    if args.load_vit:
+        model.path = args.vit_path
+    model = model.to(device)
+    if len(args.gpu.split(',')) > 1:
+        model = torch.nn.DataParallel(model, device_ids=list(range(len(args.gpu.split(',')))))
 
-    if args.only_triplet:
-        if args.eval_embedding:
-            val_acc, val_auc, val_sens, val_spec = evaluate_embedding_svm(
-                model, train_loader, val_loader, device, kernel='rbf', C=1.0
-            )
-            print(f'Val set (SVM): Accuracy: {val_acc:.2f}%, AUC: {val_auc:.4f}, Sens: {val_sens:.4f}, Spec: {val_spec:.4f}')
+    # Loss và Optimizer
+    criterion_ce = nn.CrossEntropyLoss()
+    optimizer = optim.SGD(model.parameters(),
+                          lr=args.lr,
+                          momentum=args.momentum,
+                          weight_decay=args.weight_decay)
+
+    best_val_auc = 0.0
+    best_epoch = -1
+
+    for epoch in range(1, args.epochs + 1):
+        print(f'\n===== Epoch {epoch}/{args.epochs} =====')
+
+        # Cập nhật learning rate
+        current_lr = max(args.lr * (0.1 ** (epoch // 10)), 1e-5)
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = current_lr
+        print(f'Learning rate: {current_lr:.6f}')
+
+        train_loss, train_acc = train_one_epoch(epoch, model, train_loader, optimizer,
+                                                criterion_ce, None, device, args, margin)
+
+        if args.only_triplet:
+            if args.eval_embedding:
+                val_acc, val_auc, val_sens, val_spec = evaluate_embedding_svm(
+                    model, train_loader, val_loader, device, kernel='rbf', C=0.1
+                )
+                print(f'Val set (SVM): Accuracy: {val_acc:.2f}%, AUC: {val_auc:.4f}, Sens: {val_sens:.4f}, Spec: {val_spec:.4f}')
+                if val_auc > best_val_auc:
+                    best_val_auc = val_auc
+                    best_epoch = epoch
+                    save_path = os.path.join(save_dir, f'best_model_triplet_only_{args.experiment}.pth')
+                    state_dict = model.module.state_dict() if isinstance(model, torch.nn.DataParallel) else model.state_dict()
+                    torch.save(state_dict, save_path)
+                    print(f'Checkpoint saved to {save_path} (val AUC: {val_auc:.4f})')
+            else:
+                # Nếu không đánh giá, lưu theo train loss (cần khai báo best_val_loss)
+                if 'best_val_loss' not in locals():
+                    best_val_loss = float('inf')
+                if train_loss < best_val_loss:
+                    best_val_loss = train_loss
+                    save_path = os.path.join(save_dir, f'best_model_triplet_only_{args.experiment}.pth')
+                    state_dict = model.module.state_dict() if isinstance(model, torch.nn.DataParallel) else model.state_dict()
+                    torch.save(state_dict, save_path)
+                    print(f'Checkpoint saved (train loss: {train_loss:.4f})')
+        else:
+            val_loss, val_acc, val_auc, val_sens, val_spec = evaluate(model, val_loader, criterion_ce, device, 'Val')
             if val_auc > best_val_auc:
                 best_val_auc = val_auc
                 best_epoch = epoch
-                save_path = os.path.join(args.save_dir, f'best_model_triplet_only_{args.experiment}.pth')
+                save_path = os.path.join(save_dir, f'best_model_ce_{args.experiment}.pth')
                 state_dict = model.module.state_dict() if isinstance(model, torch.nn.DataParallel) else model.state_dict()
                 torch.save(state_dict, save_path)
                 print(f'Checkpoint saved to {save_path} (val AUC: {val_auc:.4f})')
-        else:
-            # Nếu không đánh giá, chỉ lưu theo train loss (tạm thời)
-            if train_loss < best_val_loss:  # cần định nghĩa best_val_loss ban đầu
-                best_val_loss = train_loss
-                save_path = os.path.join(args.save_dir, f'best_model_triplet_only_{args.experiment}.pth')
-                state_dict = model.module.state_dict() if isinstance(model, torch.nn.DataParallel) else model.state_dict()
-                torch.save(state_dict, save_path)
-                print(f'Checkpoint saved (train loss: {train_loss:.4f})')
-    else:
-        # Đánh giá với Youden (đã được tích hợp trong hàm evaluate)
-        val_loss, val_acc, val_auc, val_sens, val_spec = evaluate(model, val_loader, criterion_ce, device, 'Val')
-        # Lưu model dựa trên val AUC
-        if val_auc > best_val_auc:
-            best_val_auc = val_auc
-            best_epoch = epoch
-            save_path = os.path.join(args.save_dir, f'best_model_ce_{args.experiment}.pth')
-            state_dict = model.module.state_dict() if isinstance(model, torch.nn.DataParallel) else model.state_dict()
-            torch.save(state_dict, save_path)
-            print(f'Checkpoint saved to {save_path} (val AUC: {val_auc:.4f})')
 
-print(f'\nTraining finished. Best validation AUC: {best_val_auc:.4f} at epoch {best_epoch}')
+    print(f'\nTraining finished for margin={margin}. Best validation AUC: {best_val_auc:.4f} at epoch {best_epoch}')
 
-# -------------------------------
-# Đánh giá cuối cùng trên tập test
-# -------------------------------
-print('\nLoading best model for test evaluation...')
-if args.only_triplet:
-    best_model_path = os.path.join(args.save_dir, f'best_model_triplet_only_{args.experiment}.pth')
-    model_test = FusionM(num_classes=args.num_class, in_c=in_channels,
-                         load_vit=False, embedding_dim=args.embedding_dim)
-    model_test.load_state_dict(torch.load(best_model_path, map_location=device))
-    model_test = model_test.to(device)
-    if len(args.gpu.split(',')) > 1:
-        model_test = torch.nn.DataParallel(model_test)
-    
-    def evaluate_final_svm(model, train_loader, test_loader, device, kernel='rbf', C=1.0):
-        model.eval()
-        train_embs, train_labels = [], []
-        test_embs, test_labels = [], []
-        with torch.no_grad():
-            for data, target in train_loader:
-                emb = model(data.to(device), return_embedding=True).cpu().numpy()
-                train_embs.append(emb)
-                train_labels.append(target.numpy())
-            for data, target in test_loader:
-                emb = model(data.to(device), return_embedding=True).cpu().numpy()
-                test_embs.append(emb)
-                test_labels.append(target.numpy())
-        X_train = np.concatenate(train_embs)
-        y_train = np.concatenate(train_labels)
-        X_test = np.concatenate(test_embs)
-        y_test = np.concatenate(test_labels)
-        clf = SVC(kernel=kernel, C=C, probability=True, random_state=42)
-        clf.fit(X_train, y_train)
-        y_pred = clf.predict(X_test)
-        y_proba = clf.predict_proba(X_test)[:, 1]
-        acc = accuracy_score(y_test, y_pred) * 100
-        auc = roc_auc_score(y_test, y_proba)
-        cm = confusion_matrix(y_test, y_pred)
-        TN, FP = cm[0,0], cm[0,1]
-        FN, TP = cm[1,0], cm[1,1]
-        sens = TP / (TP + FN) if (TP + FN) > 0 else 0.0
-        spec = TN / (TN + FP) if (TN + FP) > 0 else 0.0
-        print(f'Test set (SVM): Accuracy: {acc:.2f}%, AUC: {auc:.4f}, Sens: {sens:.4f}, Spec: {spec:.4f}')
-        print(classification_report(y_test, y_pred, target_names=['Benign', 'Malignant'], digits=4))
-        print('Confusion Matrix:')
-        print(cm)
-        return acc, auc
-    
-    evaluate_final_svm(model_test, train_loader, test_loader, device, kernel='rbf', C=0.1)
-else:
-    best_model_path = os.path.join(args.save_dir, f'best_model_ce_{args.experiment}.pth')
-    if os.path.exists(best_model_path):
+    # ----- Đánh giá test cho margin này -----
+    print('\nLoading best model for test evaluation...')
+    if args.only_triplet:
+        best_model_path = os.path.join(save_dir, f'best_model_triplet_only_{args.experiment}.pth')
         model_test = FusionM(num_classes=args.num_class, in_c=in_channels,
                              load_vit=False, embedding_dim=args.embedding_dim)
         model_test.load_state_dict(torch.load(best_model_path, map_location=device))
         model_test = model_test.to(device)
         if len(args.gpu.split(',')) > 1:
             model_test = torch.nn.DataParallel(model_test)
-        # Đánh giá test với Youden
-        evaluate(model_test, test_loader, criterion_ce, device, 'Test')
+        evaluate_final_svm(model_test, train_loader, test_loader, device, kernel='rbf', C=0.1)
     else:
-        print('Best model not found, evaluating current model.')
-        evaluate(model, test_loader, criterion_ce, device, 'Test')
+        best_model_path = os.path.join(save_dir, f'best_model_ce_{args.experiment}.pth')
+        if os.path.exists(best_model_path):
+            model_test = FusionM(num_classes=args.num_class, in_c=in_channels,
+                                 load_vit=False, embedding_dim=args.embedding_dim)
+            model_test.load_state_dict(torch.load(best_model_path, map_location=device))
+            model_test = model_test.to(device)
+            if len(args.gpu.split(',')) > 1:
+                model_test = torch.nn.DataParallel(model_test)
+            evaluate(model_test, test_loader, criterion_ce, device, 'Test')
+        else:
+            print('Best model not found, evaluating current model.')
+            evaluate(model, test_loader, criterion_ce, device, 'Test')
+
+    # Lưu kết quả vào file log
+    log_file = os.path.join(save_dir, 'results.txt')
+    with open(log_file, 'w') as f:
+        f.write(f"Margin: {margin}\n")
+        f.write(f"Best validation AUC: {best_val_auc:.4f} at epoch {best_epoch}\n")
+        # Bạn có thể thêm các chỉ số khác nếu muốn
+    print(f'Results saved to {log_file}')
+
+# -------------------------------
+# HÀM CHÍNH
+# -------------------------------
+def main():
+    # Danh sách margin lấy từ args
+    margin_list = args.triplet_margin
+    print(f"Will run with margins: {margin_list}")
+
+    for margin in margin_list:
+        train_with_margin(margin, args, train_loader, val_loader, test_loader, in_channels, device)
+
+if __name__ == "__main__":
+    main()
