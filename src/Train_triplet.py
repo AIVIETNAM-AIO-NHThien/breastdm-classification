@@ -144,7 +144,7 @@ optimizer = optim.SGD(model.parameters(),
 # -------------------------------
 # Semi-hard triplet loss (dùng cho only_triplet và combined)
 # -------------------------------
-def batch_semihard_triplet_loss(embeddings, labels, margin=1.0):
+def batch_semihard_triplet_loss(embeddings, labels, margin=0.5):
     pairwise_dist = torch.cdist(embeddings, embeddings, p=2)
     loss = torch.tensor(0.0, device=embeddings.device, dtype=embeddings.dtype)
     num_triplets = 0
@@ -229,7 +229,7 @@ def evaluate(model, loader, criterion_ce, device, target_name='Val'):
 # -------------------------------
 # Hàm đánh giá bằng SVM trên embedding (dùng cho only_triplet)
 # -------------------------------
-def evaluate_embedding_svm(model, train_loader, val_loader, device, kernel='rbf', C=1.0):
+def evaluate_embedding_svm(model, train_loader, val_loader, device, kernel='rbf', C=0.1):
     model.eval()
     train_embs, train_labels = [], []
     val_embs, val_labels = [], []
@@ -421,7 +421,7 @@ if args.only_triplet:
         print(cm)
         return acc, auc
     
-    evaluate_final_svm(model_test, train_loader, test_loader, device, kernel='rbf', C=1.0)
+    evaluate_final_svm(model_test, train_loader, test_loader, device, kernel='rbf', C=0.1)
 else:
     best_model_path = os.path.join(args.save_dir, f'best_model_ce_{args.experiment}.pth')
     if os.path.exists(best_model_path):
