@@ -42,7 +42,7 @@ class EarlyStopping:
 # -------------------------------
 # Seed
 # -------------------------------
-def set_seed(seed=86):
+def set_seed(seed=8):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -51,7 +51,7 @@ def set_seed(seed=86):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-set_seed(86)
+set_seed(8)
 
 # -------------------------------
 # Cấu hình dòng lệnh
@@ -125,10 +125,6 @@ if len(args.gpu.split(',')) > 1:
 # Loss, Optimizer (SGD không scheduler – tự cập nhật lr)
 # -------------------------------
 criterion = nn.CrossEntropyLoss()
-optimizer = optim.SGD(model.parameters(),
-                      lr=args.lr,
-                      momentum=args.momentum,
-                      weight_decay=args.weight_decay)
 
 # -------------------------------
 # Hàm tính Sensitivity và Specificity dùng Youden index (giống tác giả)
@@ -239,13 +235,29 @@ early_stopping = EarlyStopping(patience=20, verbose=True)
 for epoch in range(1, args.epochs + 1):
     print(f'\n===== Epoch {epoch}/{args.epochs} =====')
 
-    # Cập nhật learning rate theo công thức của tác giả
+    # Learning rate giống code tác giả
     current_lr = max(args.lr * (0.1 ** (epoch // 10)), 1e-5)
-    for param_group in optimizer.param_groups:
-        param_group['lr'] = current_lr
+
     print(f'Learning rate: {current_lr:.6f}')
 
-    train_loss, train_acc = train_one_epoch(epoch, model, train_loader, optimizer, criterion, device)
+    # ======================================================
+    # Tạo lại optimizer mỗi epoch (giống hệt code tác giả)
+    # ======================================================
+    optimizer = optim.SGD(
+        model.parameters(),
+        lr=current_lr,
+        momentum=args.momentum,
+        weight_decay=args.weight_decay
+    )
+
+    train_loss, train_acc = train_one_epoch(
+        epoch,
+        model,
+        train_loader,
+        optimizer,
+        criterion,
+        device
+    )
     val_loss, val_acc, val_auc, val_sens, val_spec = evaluate(model, val_loader, criterion, device, 'Val')
 
     # Early stopping dựa trên validation loss
