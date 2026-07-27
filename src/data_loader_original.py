@@ -14,6 +14,9 @@ class BreastDMDataset(Dataset):
     Hỗ trợ hai thí nghiệm:
     - Exp-1: 9 kênh (VIBRANT + VIBRANT+C1 ... +C8)
     - Exp-2: 17 kênh (VIBRANT + 8 post-contrast + 8 subtraction)
+
+    Thứ tự xử lý:
+        Load ảnh → Stack kênh → Resize về 96x96 → Augmentation (chỉ train: crop, flip) → Intensity normalization
     """
 
     def __init__(
@@ -37,13 +40,18 @@ class BreastDMDataset(Dataset):
 
         self.num_channels = len(self.folders)
         self.label_dict = {"Benign": 0, "Malignant": 1}
-
-        # Khởi tạo RandomResizedCrop cho augmentation (scaling)
-        self.random_crop = transforms.RandomResizedCrop(
-            size=96, scale=(0.8, 1.0), ratio=(1.0, 1.0)
-        )
-
         self.samples = self._build_samples()
+
+        # Augmentation chỉ cho train
+        if augment:
+            self.augmentation = transforms.Compose([
+                # Random crop + resize (scaling) với tỉ lệ 0.8~1.0
+                transforms.RandomResizedCrop(size=96, scale=(0.8, 1.0), ratio=(1.0, 1.0)),
+                transforms.RandomHorizontalFlip(p=0.5),
+                transforms.RandomVerticalFlip(p=0.5),
+            ])
+        else:
+            self.augmentation = None
 
     def _build_samples(self) -> List[dict]:
         samples = []
@@ -93,15 +101,17 @@ class BreastDMDataset(Dataset):
         return len(self.samples)
 
     def _load_and_stack(self, patient_dir: str, slice_name: str) -> torch.Tensor:
+        """Đọc tất cả các kênh và xếp chồng thành tensor (C, H, W)"""
         channels = []
         for folder in self.folders:
             img_path = os.path.join(patient_dir, folder, slice_name)
-            img = Image.open(img_path).convert("L")
-            img_tensor = TF.to_tensor(img)  # (1, H, W)
+            img = Image.open(img_path).convert("L")   # grayscale
+            img_tensor = TF.to_tensor(img)            # (1, H, W)
             channels.append(img_tensor)
-        return torch.cat(channels, dim=0)  # (C, H, W)
+        return torch.cat(channels, dim=0)              # (C, H, W)
 
     def _intensity_normalize(self, tensor: torch.Tensor) -> torch.Tensor:
+        """Chuẩn hóa cường độ theo z-score với cắt phân vị 0.1% và 99.9%"""
         arr = tensor.numpy()
         low = np.percentile(arr, 0.1)
         high = np.percentile(arr, 99.9)
@@ -113,22 +123,6 @@ class BreastDMDataset(Dataset):
         arr_norm = (arr_clipped - mean) / std
         return torch.from_numpy(arr_norm).float()
 
-    def _augment(self, img: torch.Tensor) -> torch.Tensor:
-        # Random crop + resize (scaling) – dùng RandomResizedCrop
-        img = self.random_crop(img)
-
-        # Random horizontal flip
-        if torch.rand(1) > 0.5:
-            img = TF.hflip(img)
-        # Random vertical flip
-        if torch.rand(1) > 0.5:
-            img = TF.vflip(img)
-        # Random rotation (0, 90, 180, 270)
-        angle = torch.randint(0, 4, (1,)).item() * 90
-        if angle != 0:
-            img = TF.rotate(img, angle, fill=0.0)
-        return img
-
     def __getitem__(self, index: int) -> Tuple[torch.Tensor, int]:
         sample = self.samples[index]
         patient_dir = sample["patient_dir"]
@@ -136,17 +130,18 @@ class BreastDMDataset(Dataset):
         label = sample["label"]
 
         # 1. Đọc và xếp chồng kênh
-        img = self._load_and_stack(patient_dir, slice_name)  # (C, H, W)
+        img = self._load_and_stack(patient_dir, slice_name)   # (C, H, W)
 
-        # 2. Augmentation (chỉ tập train, đã bao gồm resize về 96x96)
-        if self.augment:
-            img = self._augment(img)
+        # 2. Resize về 96×96 (cố định cho tất cả)
+        img = TF.resize(img, [96, 96], antialias=True)        # (C, 96, 96)
 
-        # 3. Chuẩn hóa cường độ
-        img = self._intensity_normalize(img)
+        # 3. Augmentation (chỉ train): crop + flip
+        if self.augmentation is not None:
+            # transforms.Compose nhận tensor (C, H, W) và trả về cùng shape
+            img = self.augmentation(img)
 
-        # 4. Resize lần cuối (đảm bảo 96x96 cho cả val/test)
-        img = TF.resize(img, [96, 96], antialias=True)
+        # 4. Intensity normalization (z-score)
+        img = self._intensity_normalize(img)                  # (C, 96, 96)
 
         return img, label
 
@@ -157,6 +152,7 @@ def create_dataloaders(
     batch_size: int = 16,
     num_workers: int = 4,
 ) -> Tuple[DataLoader, DataLoader, DataLoader]:
+
     train_dataset = BreastDMDataset(
         root_dir=root_dir,
         split="train",
@@ -182,18 +178,21 @@ def create_dataloaders(
         shuffle=True,
         num_workers=num_workers,
         drop_last=True,
+        pin_memory=True,
     )
     val_loader = DataLoader(
         val_dataset,
         batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,
+        pin_memory=True,
     )
     test_loader = DataLoader(
         test_dataset,
         batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,
+        pin_memory=True,
     )
 
     return train_loader, val_loader, test_loader
@@ -208,6 +207,6 @@ if __name__ == "__main__":
         num_workers=2,
     )
     for imgs, labels in train_loader:
-        print(f"Batch shape: {imgs.shape}")
+        print(f"Batch shape: {imgs.shape}")   # (8, 17, 96, 96)
         print(f"Labels: {labels}")
         break
