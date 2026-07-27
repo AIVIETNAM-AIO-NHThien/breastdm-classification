@@ -230,7 +230,7 @@ best_auc = 0.0
 best_epoch = -1
 os.makedirs(args.save_dir, exist_ok=True)
 
-early_stopping = EarlyStopping(patience=20, verbose=True)
+# early_stopping = EarlyStopping(patience=20, verbose=True)
 
 for epoch in range(1, args.epochs + 1):
     print(f'\n===== Epoch {epoch}/{args.epochs} =====')
@@ -261,10 +261,10 @@ for epoch in range(1, args.epochs + 1):
     val_loss, val_acc, val_auc, val_sens, val_spec = evaluate(model, val_loader, criterion, device, 'Val')
 
     # Early stopping dựa trên validation loss
-    early_stopping(val_loss, model)
-    if early_stopping.early_stop:
-        print('Early stopping triggered.')
-        break
+    # early_stopping(val_loss, model)
+    # if early_stopping.early_stop:
+    #     print('Early stopping triggered.')
+    #     break
 
     # Lưu model nếu AUC validation tốt nhất (giống tác giả lưu theo AUC)
     if val_auc > best_auc:
