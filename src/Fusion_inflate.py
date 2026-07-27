@@ -101,7 +101,7 @@ class NLBlockND(nn.Module):
 
 
 class VisionTransformer_base(nn.Module):
-    # ... (giữ nguyên toàn bộ code của VisionTransformer_base, không thay đổi) ...
+    # ... (giữ nguyên code cũ, không thay đổi) ...
     def __init__(self, img_size=224, patch_size=16, in_c=3, num_classes=2,
                  embed_dim=768, depth=7, num_heads=12, mlp_ratio=4.0, qkv_bias=True,
                  qk_scale=None, representation_size=None, distilled=False, drop_ratio=0.,
@@ -181,7 +181,6 @@ def _init_vit_weights(m):
 
 
 class FCUUp(nn.Module):
-    # ... (giữ nguyên) ...
     def __init__(self, inplanes, outplanes, up_stride, act_layer=nn.ReLU,
                  norm_layer=partial(nn.BatchNorm2d, eps=1e-6)):
         super(FCUUp, self).__init__()
@@ -226,19 +225,28 @@ class FusionM(nn.Module):
         )
         self.layer1 = model_se.layer1
         self.layer2 = model_se.layer2
-        self.layer3 = model_se.layer3   # không dùng, chỉ giữ cấu trúc
+        self.layer3 = model_se.layer3   # không dùng
 
         # ==================== ViT branch ====================
         self.vit = VisionTransformer_base(img_size=img_size, patch_size=patch_size, in_c=in_c)
+
+        # ===== ĐÓNG BĂNG TOÀN BỘ ViT =====
+        for param in self.vit.parameters():
+            param.requires_grad = False
+        print("✅ ViT đã bị đóng băng (không train)")
 
         # ==================== Non‑local + Fusion ====================
         self.Nlblock = NLBlockND(in_channels=512)
         self.fcuup = FCUUp(inplanes=768, outplanes=512, up_stride=2)
         self.relu = nn.ReLU(inplace=True)
         self.avgpool = nn.AdaptiveAvgPool2d(1)
+
+        # ===== THÊM DROPOUT 0.5 SAU FUSION =====
+        self.fusion_dropout = nn.Dropout(p=0.5)
+
         self.fc = nn.Linear(1024, num_classes)
 
-        # Load ViT pretrained (nếu có)
+        # Load ViT pretrained (nếu có) – vẫn load nhưng sẽ không train
         if load_vit and vit_path is not None:
             self._load_pretrained_vit(vit_path)
         elif load_vit:
@@ -288,10 +296,10 @@ class FusionM(nn.Module):
 
         # Load state_dict
         self.vit.load_state_dict(weight_dict, strict=False)
-        print(f"Loaded pretrained ViT from {vit_path}")
+        print(f"✅ Loaded pretrained ViT from {vit_path} (đã đóng băng)")
 
     def forward(self, x):
-        # ViT forward
+        # ViT forward (sẽ không cập nhật gradient vì đã đóng băng)
         vit_x = self.vit(x)                                         # (B, num_tokens+1, 768)
         H_grid, W_grid = self.vit.patch_embed.grid_size             # 6,6
         vit_x = self.fcuup(vit_x, H_grid, W_grid)                   # (B, 512, 12, 12)
@@ -299,7 +307,7 @@ class FusionM(nn.Module):
         # CNN forward
         x = self.layer0(x)
         x = self.layer1(x)
-        se_x = self.layer2(x)                                       # (B, 512, 12, 12) với input 96x96
+        se_x = self.layer2(x)                                       # (B, 512, 12, 12)
 
         # Cross-attention fusion
         x_path1 = self.Nlblock(se_x, vit_x)   # CNN query, ViT key/value
@@ -308,6 +316,7 @@ class FusionM(nn.Module):
 
         out = self.avgpool(out)
         out = out.view(out.size(0), -1)
+        out = self.fusion_dropout(out)          # ⭐ Thêm Dropout 0.5
         out = self.fc(out)
         return out
 

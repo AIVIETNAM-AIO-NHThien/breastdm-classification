@@ -57,7 +57,7 @@ set_seed(86)
 # Cấu hình dòng lệnh
 # -------------------------------
 parser = argparse.ArgumentParser(description='LG-CAFN training on BreastDM')
-parser.add_argument('--batch-size', type=int, default=32, help='batch size')
+parser.add_argument('--batch-size', type=int, default=16, help='batch size (giảm từ 32 để ổn định hơn)')
 parser.add_argument('--model', type=str, default='fusion', choices=['fusion'], help='model type')
 parser.add_argument('--gpu', type=str, default='0', help='GPU id(s)')
 parser.add_argument('--num_class', type=int, default=2, help='number of classes')
@@ -67,7 +67,7 @@ parser.add_argument('--data-root', type=str, required=True, help='root directory
 parser.add_argument('--epochs', type=int, default=100, help='number of training epochs')
 parser.add_argument('--lr', type=float, default=0.01, help='initial learning rate')
 parser.add_argument('--momentum', type=float, default=0.9, help='SGD momentum')
-parser.add_argument('--weight-decay', type=float, default=0.01, help='L2 regularization')
+parser.add_argument('--weight-decay', type=float, default=0.05, help='L2 regularization (tăng từ 0.01 lên 0.05)')
 parser.add_argument('--load-vit', action='store_true', default=False, help='load pretrained ViT weights')
 parser.add_argument('--vit-path', type=str, default='./model/vit_base_patch16_224_in21k.pth',
                     help='path to ViT pretrained weights')
@@ -230,25 +230,28 @@ best_auc = 0.0
 best_epoch = -1
 os.makedirs(args.save_dir, exist_ok=True)
 
-# early_stopping = EarlyStopping(patience=20, verbose=True)
+# ===== BẬT EARLY STOPPING =====
+early_stopping = EarlyStopping(patience=20, verbose=True)
 
 for epoch in range(1, args.epochs + 1):
     print(f'\n===== Epoch {epoch}/{args.epochs} =====')
 
     # Learning rate giống code tác giả
     current_lr = max(args.lr * (0.1 ** (epoch // 10)), 1e-5)
-
     print(f'Learning rate: {current_lr:.6f}')
 
     # ======================================================
-    # Tạo lại optimizer mỗi epoch (giống hệt code tác giả)
+    # Tạo optimizer mỗi epoch (chỉ train các params có requires_grad=True)
     # ======================================================
+    # Lọc tham số trainable (ViT đã bị đóng băng trong model)
+    trainable_params = [p for p in model.parameters() if p.requires_grad]
     optimizer = optim.SGD(
-        model.parameters(),
+        trainable_params,
         lr=current_lr,
         momentum=args.momentum,
         weight_decay=args.weight_decay
     )
+    print(f"Trainable parameters: {sum(p.numel() for p in trainable_params):,}")
 
     train_loss, train_acc = train_one_epoch(
         epoch,
@@ -261,10 +264,10 @@ for epoch in range(1, args.epochs + 1):
     val_loss, val_acc, val_auc, val_sens, val_spec = evaluate(model, val_loader, criterion, device, 'Val')
 
     # Early stopping dựa trên validation loss
-    # early_stopping(val_loss, model)
-    # if early_stopping.early_stop:
-    #     print('Early stopping triggered.')
-    #     break
+    early_stopping(val_loss, model)
+    if early_stopping.early_stop:
+        print('Early stopping triggered.')
+        break
 
     # Lưu model nếu AUC validation tốt nhất (giống tác giả lưu theo AUC)
     if val_auc > best_auc:
@@ -284,7 +287,6 @@ print(f'\nTraining finished. Best validation AUC: {best_auc:.4f} at epoch {best_
 # Đánh giá trên test với model tốt nhất
 # -------------------------------
 print('\nLoading best model for test evaluation...')
-# Tìm file model có AUC cao nhất đã lưu (có thể load trực tiếp best_epoch)
 best_model_path = os.path.join(args.save_dir, f'best_model_epoch_{best_epoch}_auc_{best_auc:.4f}.pth')
 if os.path.exists(best_model_path):
     model_test = FusionM(num_classes=args.num_class, in_c=in_channels, load_vit=False)

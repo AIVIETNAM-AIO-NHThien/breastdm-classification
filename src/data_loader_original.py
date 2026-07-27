@@ -16,7 +16,7 @@ class BreastDMDataset(Dataset):
     - Exp-2: 17 kênh (VIBRANT + 8 post-contrast + 8 subtraction)
 
     Thứ tự xử lý:
-        Load ảnh → Stack kênh → Resize về 96x96 → Augmentation (chỉ train: crop, flip) → Intensity normalization
+        Load ảnh → Stack kênh → Resize về 96x96 → Augmentation (chỉ train: crop, flip, blur) → Intensity normalization
     """
 
     def __init__(
@@ -42,13 +42,13 @@ class BreastDMDataset(Dataset):
         self.label_dict = {"Benign": 0, "Malignant": 1}
         self.samples = self._build_samples()
 
-        # Augmentation chỉ cho train
+        # Augmentation chỉ cho train – cải tiến với scale rộng hơn và GaussianBlur
         if augment:
             self.augmentation = transforms.Compose([
-                # Random crop + resize (scaling) với tỉ lệ 0.8~1.0
-                transforms.RandomResizedCrop(size=96, scale=(0.8, 1.0), ratio=(1.0, 1.0)),
+                transforms.RandomResizedCrop(96, scale=(0.6, 1.0), ratio=(0.9, 1.1)),
                 transforms.RandomHorizontalFlip(p=0.5),
                 transforms.RandomVerticalFlip(p=0.5),
+                transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 0.5)),
             ])
         else:
             self.augmentation = None
@@ -135,9 +135,8 @@ class BreastDMDataset(Dataset):
         # 2. Resize về 96×96 (cố định cho tất cả)
         img = TF.resize(img, [96, 96], antialias=True)        # (C, 96, 96)
 
-        # 3. Augmentation (chỉ train): crop + flip
+        # 3. Augmentation (chỉ train): crop + flip + blur
         if self.augmentation is not None:
-            # transforms.Compose nhận tensor (C, H, W) và trả về cùng shape
             img = self.augmentation(img)
 
         # 4. Intensity normalization (z-score)
@@ -196,17 +195,3 @@ def create_dataloaders(
     )
 
     return train_loader, val_loader, test_loader
-
-
-if __name__ == "__main__":
-    root = "/kaggle/input/roi-classification"
-    train_loader, val_loader, test_loader = create_dataloaders(
-        root_dir=root,
-        experiment="Exp-2",
-        batch_size=8,
-        num_workers=2,
-    )
-    for imgs, labels in train_loader:
-        print(f"Batch shape: {imgs.shape}")   # (8, 17, 96, 96)
-        print(f"Labels: {labels}")
-        break
