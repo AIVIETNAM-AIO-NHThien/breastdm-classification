@@ -232,8 +232,7 @@ class FusionM(nn.Module):
 
         # ===== ĐÓNG BĂNG TOÀN BỘ ViT =====
         for param in self.vit.parameters():
-            param.requires_grad = False
-        print("✅ ViT đã bị đóng băng (không train)")
+            param.requires_grad = True
 
         # ==================== Non‑local + Fusion ====================
         self.Nlblock = NLBlockND(in_channels=512)
@@ -241,12 +240,10 @@ class FusionM(nn.Module):
         self.relu = nn.ReLU(inplace=True)
         self.avgpool = nn.AdaptiveAvgPool2d(1)
 
-        # ===== THÊM DROPOUT 0.5 SAU FUSION =====
-        self.fusion_dropout = nn.Dropout(p=0.5)
+        # ===== THÊM DROPOUT SAU FUSION =====
+        self.fusion_dropout = nn.Dropout(p=0.3)
 
         self.fc = nn.Linear(1024, num_classes)
-
-        # Load ViT pretrained (nếu có) – vẫn load nhưng sẽ không train
         if load_vit and vit_path is not None:
             self._load_pretrained_vit(vit_path)
         elif load_vit:

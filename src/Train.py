@@ -40,20 +40,6 @@ class EarlyStopping:
 
 
 # -------------------------------
-# Seed
-# -------------------------------
-def set_seed(seed=8):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-
-set_seed(8)
-
-# -------------------------------
 # Cấu hình dòng lệnh
 # -------------------------------
 parser = argparse.ArgumentParser(description='LG-CAFN training on BreastDM')
@@ -74,8 +60,21 @@ parser.add_argument('--vit-path', type=str, default='./model/vit_base_patch16_22
 parser.add_argument('--save-dir', type=str, default='checkpoints', help='directory to save model checkpoints')
 parser.add_argument('--num-workers', type=int, default=4, help='number of data loading workers')
 
+parser.add_argument('--seed', type=int, default=8, help='random seed')
 args = parser.parse_args()
 
+
+
+def set_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+set_seed(args.seed)
 # -------------------------------
 # Thiết bị GPU
 # -------------------------------
