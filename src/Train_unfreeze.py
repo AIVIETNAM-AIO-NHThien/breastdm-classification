@@ -17,7 +17,7 @@ from Fusion_inflate import FusionM
 # Early Stopping (giống tác giả)
 # -------------------------------
 class EarlyStopping:
-    def __init__(self, patience=20, verbose=True, delta=0):
+    def __init__(self, patience=50, verbose=True, delta=0):
         self.patience = patience
         self.verbose = verbose
         self.delta = delta
@@ -326,7 +326,7 @@ best_auc = 0.0
 best_epoch = -1
 os.makedirs(args.save_dir, exist_ok=True)
 
-early_stopping = EarlyStopping(patience=20, verbose=True)
+early_stopping = EarlyStopping(patience=50, verbose=True)
 
 for epoch in range(1, args.epochs + 1):
     print(f'\n{"="*20} Epoch {epoch}/{args.epochs} {"="*20}')
