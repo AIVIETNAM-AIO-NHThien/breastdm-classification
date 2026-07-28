@@ -241,7 +241,8 @@ class FusionM(nn.Module):
         self.avgpool = nn.AdaptiveAvgPool2d(1)
 
         # ===== THÊM DROPOUT SAU FUSION =====
-        self.fusion_dropout = nn.Dropout(p=0.5)
+        # self.fusion_dropout = nn.Dropout(p=0.5)
+        
 
         self.fc = nn.Linear(1024, num_classes)
         if load_vit and vit_path is not None:
@@ -313,7 +314,7 @@ class FusionM(nn.Module):
 
         out = self.avgpool(out)
         out = out.view(out.size(0), -1)
-        out = self.fusion_dropout(out)          # ⭐ Thêm Dropout 0.5
+        # out = self.fusion_dropout(out)          
         out = self.fc(out)
         return out
 
