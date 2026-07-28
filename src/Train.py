@@ -245,7 +245,7 @@ for epoch in range(1, args.epochs + 1):
     # Lọc tham số trainable (ViT đã bị đóng băng trong model)
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     optimizer = optim.SGD(
-        trainable_params,
+        model.parameters(),
         lr=current_lr,
         momentum=args.momentum,
         weight_decay=args.weight_decay
