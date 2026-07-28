@@ -314,7 +314,7 @@ class FusionM(nn.Module):
 
         out = self.avgpool(out)
         out = out.view(out.size(0), -1)
-        # out = self.fusion_dropout(out)          
+        out = self.fusion_dropout(out)          
         out = self.fc(out)
         return out
 
