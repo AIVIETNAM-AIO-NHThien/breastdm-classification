@@ -230,19 +230,8 @@ class FusionM(nn.Module):
         ssl._create_default_https_context = ssl._create_unverified_context
         se_resnet = timm.create_model('seresnet50', pretrained=True)
 
-        # Tạo stage0: conv1 + bn1 + act1 + maxpool + layer1 (3 block, stride 4, 256c)
-        self.cnn_stage0 = nn.Sequential(
-            se_resnet.conv1,
-            se_resnet.bn1,
-            se_resnet.act1,
-            se_resnet.maxpool,
-            se_resnet.layer1
-        )
-        # Stage1: layer2 (4 block, stride 8, 512c) – đây chính là đầu ra ta cần
-        self.cnn_stage1 = se_resnet.layer2
-
-        # --- Weight inflation cho CNN: trung bình 3 kênh pretrained -> lặp lại thành in_c kênh ---
-        old_conv = self.cnn_stage0[0]  # conv1 gốc (3 kênh)
+        # --- Sửa conv1 để nhận in_c kênh (giữ 3 kênh RGB đầu, các kênh còn lại = trung bình) ---
+        old_conv = se_resnet.conv1
         new_conv = nn.Conv2d(
             in_c, old_conv.out_channels,
             kernel_size=old_conv.kernel_size,
@@ -251,9 +240,24 @@ class FusionM(nn.Module):
             bias=False
         )
         with torch.no_grad():
-            avg_weight = old_conv.weight.mean(dim=1, keepdim=True)  # [64, 1, 7, 7]
-            new_conv.weight.copy_(avg_weight.repeat(1, in_c, 1, 1))
-        self.cnn_stage0[0] = new_conv
+            # Giữ nguyên 3 kênh đầu (RGB)
+            new_conv.weight[:, :3] = old_conv.weight
+            # Trung bình của 3 kênh RGB
+            mean_w = old_conv.weight.mean(dim=1, keepdim=True)  # [64, 1, 7, 7]
+            # Gán cho các kênh còn lại
+            for i in range(3, in_c):
+                new_conv.weight[:, i] = mean_w[:, 0]
+        se_resnet.conv1 = new_conv
+
+        # ----- Tách các stage giống model cũ -----
+        self.layer0 = nn.Sequential(
+            se_resnet.conv1,
+            se_resnet.bn1,
+            se_resnet.act1,
+            se_resnet.maxpool
+        )
+        self.layer1 = se_resnet.layer1   # 256 kênh, size 24x24
+        self.layer2 = se_resnet.layer2   # 512 kênh, size 12x12
 
         # ----- Fusion -----
         self.Nlblock = NLBlockND(in_channels=512)
@@ -276,11 +280,10 @@ class FusionM(nn.Module):
     def _init_new_layers(self):
         for m in [self.fcuup, self.Nlblock, self.fc]:
             m.apply(_init_vit_weights)
-        # Khởi tạo thêm embedding head
         self.embedding_head.apply(_init_vit_weights)
 
     def _load_pretrained_vit(self):
-        """Load pretrained ViT, xử lý pos_embed và weight inflation cho patch_embed."""
+        """Load pretrained ViT, xử lý pos_embed và weight inflation cho patch_embed (giữ 3 kênh đầu)."""
         if not os.path.exists(self.path):
             print(f"⚠️  Pretrained ViT not found at {self.path}")
             return
@@ -291,17 +294,22 @@ class FusionM(nn.Module):
         for k in ['head.weight', 'head.bias', 'head_dist.weight', 'head_dist.bias']:
             state_dict.pop(k, None)
 
-        # --- Weight inflation cho patch_embed ---
+        # --- Weight inflation cho patch_embed: giữ 3 kênh đầu, các kênh còn lại = trung bình ---
         if 'patch_embed.proj.weight' in state_dict:
             old_weight = state_dict['patch_embed.proj.weight']          # [768, 3, 16, 16]
             new_channels = self.vit.patch_embed.proj.weight.shape[1]    # 9 hoặc 17
             if old_weight.shape[1] != new_channels:
                 print(f"🔄 Inflating patch_embed channels: {old_weight.shape[1]} → {new_channels}")
-                avg_weight = old_weight.mean(dim=1, keepdim=True)       # [768, 1, 16, 16]
-                state_dict['patch_embed.proj.weight'] = avg_weight.repeat(1, new_channels, 1, 1)
-                # bias giữ nguyên nếu có
+                new_weight = torch.zeros_like(self.vit.patch_embed.proj.weight)
+                # Giữ 3 kênh đầu
+                new_weight[:, :3] = old_weight
+                # Trung bình cho các kênh còn lại
+                mean_w = old_weight.mean(dim=1, keepdim=True)           # [768, 1, 16, 16]
+                for i in range(3, new_channels):
+                    new_weight[:, i] = mean_w[:, 0]
+                state_dict['patch_embed.proj.weight'] = new_weight
 
-        # Nội suy pos_embed
+        # Nội suy pos_embed (giống model cũ)
         if 'pos_embed' in state_dict:
             pretrained_pos = state_dict['pos_embed']          # [1, 197, 768]
             current_pos = self.vit.pos_embed                  # [1, 37, 768]
@@ -316,13 +324,11 @@ class FusionM(nn.Module):
                 patches = patches.permute(0, 2, 3, 1).reshape(1, new_grid * new_grid, -1)
                 state_dict['pos_embed'] = torch.cat([cls_token, patches], dim=1)
 
-        # Load với strict=False – bỏ qua các block thừa (7‑11)
+        # Load với strict=False
         missing, unexpected = self.vit.load_state_dict(state_dict, strict=False)
-        print(f"✅ Loaded pretrained ViT (first 7 blocks) with weight inflation")
+        print(f"✅ Loaded pretrained ViT (first 7 blocks) with weight inflation (kept 3 RGB channels)")
         if missing:
             print(f"   Missing keys (will be randomly init): {missing}")
-        if unexpected:
-            print(f"   Unexpected keys (ignored): {len(unexpected)} keys from blocks 7-11")
 
     def forward(self, x, return_embedding=False):
         # ViT pathway
@@ -331,9 +337,10 @@ class FusionM(nn.Module):
         H = W = int(num_patches ** 0.5)           # 6
         vit_feat = self.fcuup(vit_x, H, W)        # (B, 512, 12, 12)
 
-        # CNN pathway: chỉ dùng 2 stage đầu → 512 kênh
-        cnn_feat = self.cnn_stage0(x)             # (B, 256, 24, 24)
-        cnn_feat = self.cnn_stage1(cnn_feat)      # (B, 512, 12, 12)
+        # CNN pathway: layer0 → layer1 → layer2
+        cnn_feat = self.layer0(x)                 # (B, 64, 48, 48)
+        cnn_feat = self.layer1(cnn_feat)          # (B, 256, 24, 24)
+        cnn_feat = self.layer2(cnn_feat)          # (B, 512, 12, 12)
 
         # Cross‑attention
         out1 = self.Nlblock(cnn_feat, vit_feat)   # CNN query ViT
@@ -345,35 +352,9 @@ class FusionM(nn.Module):
         pooled = pooled.view(pooled.size(0), -1)  # (B, 1024)
 
         if return_embedding:
-            # Trả về embedding đã chuẩn hóa L2
             emb = self.embedding_head(pooled)
             emb = F.normalize(emb, p=2, dim=1)
             return emb
 
-        # Mặc định trả về logits để phân loại
         logits = self.fc(pooled)
         return logits
-
-
-# ======================== Test ========================
-if __name__ == '__main__':
-    print("Testing with 9 channels (Exp-1)...")
-    dummy = torch.rand(2, 9, 96, 96)
-    model = FusionM(num_classes=2, in_c=9, load_vit=False)
-    out = model(dummy)
-    print("Output (logits) shape:", out.shape)   # [2, 2]
-
-    emb = model(dummy, return_embedding=True)
-    print("Embedding shape:", emb.shape)        # [2, 128]
-    print("Embedding L2 norm:", emb.norm(dim=1))  # phải xấp xỉ 1
-
-    print("\nTesting with 17 channels (Exp-2)...")
-    dummy17 = torch.rand(2, 17, 96, 96)
-    model17 = FusionM(num_classes=2, in_c=17, load_vit=False)
-    out17 = model17(dummy17)
-    print("Output (logits) shape:", out17.shape)
-
-    print("\nTesting with pretrained ViT weights (with inflation)...")
-    model_pretrained = FusionM(num_classes=2, in_c=17, load_vit=True)
-    out_pretrained = model_pretrained(dummy17)
-    print("Output (logits) shape:", out_pretrained.shape)
