@@ -29,19 +29,6 @@ def calc_sens_spec_youden(all_labels, all_probs):
     cm_opt = confusion_matrix(all_labels, preds_opt)
     return sens, spec, opt_thresh, cm_opt
 
-# -------------------------------
-# Seed
-# -------------------------------
-def set_seed(seed=6):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-
-set_seed(6)
 
 # -------------------------------
 # Cấu hình dòng lệnh
@@ -57,7 +44,7 @@ parser.add_argument('--data-root', type=str, required=True, help='root directory
 parser.add_argument('--epochs', type=int, default=100, help='number of training epochs')
 parser.add_argument('--lr', type=float, default=0.01, help='initial learning rate')
 parser.add_argument('--momentum', type=float, default=0.9, help='SGD momentum')
-parser.add_argument('--weight-decay', type=float, default=0.01, help='L2 regularization')
+parser.add_argument('--weight-decay', type=float, default=0.05, help='L2 regularization')
 parser.add_argument('--load-vit', action='store_true', default=True, help='load pretrained ViT weights')
 parser.add_argument('--vit-path', type=str, default='./model/vit_base_patch16_224_in21k.pth',
                     help='path to ViT pretrained weights')
@@ -78,8 +65,20 @@ parser.add_argument('--embedding-dim', type=int, default=128,
 parser.add_argument('--eval-embedding', action='store_true', default=False,
                     help='Evaluate val accuracy/AUC using SVM on embeddings when only triplet (expensive)')
 
+parser.add_argument('--seed', type=int, default=8, help='random seed')
 args = parser.parse_args()
 
+
+def set_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+set_seed(args.seed)
 # -------------------------------
 # Thiết bị GPU
 # -------------------------------
