@@ -53,7 +53,7 @@ parser.add_argument('--data-root', type=str, required=True, help='root directory
 parser.add_argument('--epochs', type=int, default=100, help='number of training epochs')
 parser.add_argument('--lr', type=float, default=0.01, help='initial learning rate')
 parser.add_argument('--momentum', type=float, default=0.9, help='SGD momentum')
-parser.add_argument('--weight-decay', type=float, default=0.05, help='L2 regularization (tăng từ 0.01 lên 0.05)')
+parser.add_argument('--weight-decay', type=float, default=0.01, help='L2 regularization (tăng từ 0.01 lên 0.05)')
 parser.add_argument('--load-vit', action='store_true', default=False, help='load pretrained ViT weights')
 parser.add_argument('--vit-path', type=str, default='./model/vit_base_patch16_224_in21k.pth',
                     help='path to ViT pretrained weights')
