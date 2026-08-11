@@ -64,6 +64,7 @@ parser.add_argument('--embedding-dim', type=int, default=128,
                     help='Dimension of embedding for triplet loss')
 parser.add_argument('--eval-embedding', action='store_true', default=False,
                     help='Evaluate val accuracy/AUC using SVM on embeddings when only triplet (expensive)')
+parser.add_argument('--svm-C', type=float, default=0.1, help='SVM regularization parameter')
 
 parser.add_argument('--seed', type=int, default=8, help='random seed')
 args = parser.parse_args()
@@ -197,7 +198,7 @@ def evaluate(model, loader, criterion_ce, device, target_name='Val'):
 # -------------------------------
 # Hàm đánh giá bằng SVM trên embedding (dùng cho only_triplet)
 # -------------------------------
-def evaluate_embedding_svm(model, train_loader, val_loader, device, kernel='rbf', C=0.1):
+def evaluate_embedding_svm(model, train_loader, val_loader, device, kernel='rbf', C=args.svm_C):
     model.eval()
     train_embs, train_labels = [], []
     val_embs, val_labels = [], []
@@ -290,7 +291,7 @@ def train_one_epoch(epoch, model, loader, optimizer, criterion_ce, criterion_tri
 # -------------------------------
 # Hàm đánh giá cuối cùng bằng SVM cho test (chỉ dùng only_triplet)
 # -------------------------------
-def evaluate_final_svm(model, train_loader, test_loader, device, kernel='rbf', C=1.0):
+def evaluate_final_svm(model, train_loader, test_loader, device, kernel='rbf', C=args.svm_C):
     model.eval()
     train_embs, train_labels = [], []
     test_embs, test_labels = [], []
@@ -372,7 +373,7 @@ def train_with_margin(margin, args, train_loader, val_loader, test_loader, in_ch
         if args.only_triplet:
             if args.eval_embedding:
                 val_acc, val_auc, val_sens, val_spec = evaluate_embedding_svm(
-                    model, train_loader, val_loader, device, kernel='rbf', C=0.1
+                    model, train_loader, val_loader, device, kernel='rbf', C=args.svm_C
                 )
                 print(f'Val set (SVM): Accuracy: {val_acc:.2f}%, AUC: {val_auc:.4f}, Sens: {val_sens:.4f}, Spec: {val_spec:.4f}')
                 if val_auc > best_val_auc:
@@ -414,7 +415,7 @@ def train_with_margin(margin, args, train_loader, val_loader, test_loader, in_ch
         model_test = model_test.to(device)
         if len(args.gpu.split(',')) > 1:
             model_test = torch.nn.DataParallel(model_test)
-        evaluate_final_svm(model_test, train_loader, test_loader, device, kernel='rbf', C=0.1)
+        evaluate_final_svm(model_test, train_loader, test_loader, device, kernel='rbf', C=args.svm_C)
     else:
         best_model_path = os.path.join(save_dir, f'best_model_ce_{args.experiment}.pth')
         if os.path.exists(best_model_path):
