@@ -215,7 +215,6 @@ class FusionM(nn.Module):
         super(FusionM, self).__init__()
         self.in_c = in_c
         self.load_vit_flag = load_vit
-        self.fusion_dropout = nn.Dropout(p=0.5) 
         self.path = r'./model/vit_base_patch16_224_in21k.pth'
 
         # ----- ViT branch -----
@@ -351,7 +350,6 @@ class FusionM(nn.Module):
         # Global pooling
         pooled = self.avgpool(fused)              # (B, 1024, 1, 1)
         pooled = pooled.view(pooled.size(0), -1)  # (B, 1024)
-        pooled = self.fusion_dropout(pooled)
         
         if return_embedding:
             emb = self.embedding_head(pooled)
