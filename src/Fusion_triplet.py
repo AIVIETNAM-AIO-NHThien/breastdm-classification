@@ -215,7 +215,7 @@ class FusionM(nn.Module):
         super(FusionM, self).__init__()
         self.in_c = in_c
         self.load_vit_flag = load_vit
-        self.fusion_dropout = nn.Dropout(p=0.3) 
+        self.fusion_dropout = nn.Dropout(p=0.5) 
         self.path = r'./model/vit_base_patch16_224_in21k.pth'
 
         # ----- ViT branch -----
