@@ -150,7 +150,7 @@ class BreastDMDataset(Dataset):
         img = self._intensity_normalize(img)
 
         # 4. Resize lần cuối (đảm bảo 96x96 cho cả val/test)
-        img = TF.resize(img, [96, 96], antialias=True)
+        img = TF.resize(img, [96, 96])
 
         return img, label
 
