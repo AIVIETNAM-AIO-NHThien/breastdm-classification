@@ -133,7 +133,7 @@ class BreastDMDataset(Dataset):
         img = self._load_and_stack(patient_dir, slice_name)   # (C, H, W)
 
         # 2. Resize về 96×96 (cố định cho tất cả)
-        img = TF.resize(img, [96, 96], antialias=True)        # (C, 96, 96)
+        img = TF.resize(img, [96, 96])        # (C, 96, 96)
 
         # 3. Augmentation (chỉ train): crop + flip + blur
         if self.augmentation is not None:
