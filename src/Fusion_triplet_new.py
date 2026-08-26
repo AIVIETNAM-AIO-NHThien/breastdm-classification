@@ -6,7 +6,7 @@ import timm
 import torch
 from torch import nn
 import torch.nn.functional as F
-
+import pretrainedmodels
 # File này được giả sử chứa các lớp PatchEmbed, Block, OrderedDict (nếu dùng trong VisionTransformer_base)
 from VIT_model import *
 
