@@ -63,7 +63,6 @@ parser.add_argument('--vit-path', type=str, default='./model/vit_base_patch16_22
 parser.add_argument('--save-dir', type=str, default='checkpoints', help='directory to save model checkpoints')
 parser.add_argument('--num-workers', type=int, default=4, help='number of data loading workers')
 parser.add_argument('--seed', type=int, default=8, help='random seed')
-parser.add_argument('--seed', type=int, default=8, help='random seed')
 args = parser.parse_args()
 
 # Set seed
