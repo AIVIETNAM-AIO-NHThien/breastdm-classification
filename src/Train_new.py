@@ -11,7 +11,7 @@ from sklearn.metrics import roc_auc_score, roc_curve, confusion_matrix, classifi
 
 # Import data loader và model
 from data_loader_original import create_dataloaders
-from Fusion_inflate import FusionM
+from Fusion_new import FusionM
 
 
 # -------------------------------
