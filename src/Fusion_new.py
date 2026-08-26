@@ -202,7 +202,7 @@ class FusionM(nn.Module):
         model_se = pretrainedmodels.se_resnet50(pretrained='imagenet')
         
         # Sửa conv1 để nhận in_c kênh
-        old_conv = model_se.conv1
+        old_conv = model_se.layer0[0]
         new_conv = nn.Conv2d(in_c, old_conv.out_channels,
                              kernel_size=old_conv.kernel_size,
                              stride=old_conv.stride,
@@ -216,11 +216,11 @@ class FusionM(nn.Module):
 
         # Tạo layer0 - LƯU Ý: pretrainedmodels dùng .relu chứ không phải .act1
         self.layer0 = nn.Sequential(
-            model_se.conv1,
-            model_se.bn1,
-            model_se.relu,          # ⬅️ Đã sửa: pretrainedmodels dùng .relu
-            model_se.maxpool
-        )
+            new_conv,                 # <--- Dùng new_conv đã được sửa
+            model_se.layer0[1],       # bn1
+            model_se.layer0[2],       # relu
+            model_se.layer0[3]        # maxpool
+    )
         self.layer1 = model_se.layer1
         self.layer2 = model_se.layer2
 
