@@ -228,7 +228,7 @@ best_auc = 0.0
 best_epoch = -1
 os.makedirs(args.save_dir, exist_ok=True)
 
-early_stopping = EarlyStopping(patience=20, verbose=True)
+early_stopping = EarlyStopping(patience=100, verbose=True)
 
 for epoch in range(1, args.epochs + 1):
     print(f'\n===== Epoch {epoch}/{args.epochs} =====')
