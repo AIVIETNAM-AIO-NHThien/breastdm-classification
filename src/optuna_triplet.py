@@ -113,9 +113,9 @@ def objective(trial):
     # ===== 1. KHÔNG GIAN TÌM KIẾM (thu hẹp để chạy nhanh) =====
     lr = trial.suggest_float('lr', 1e-4, 0.01, log=True)
     weight_decay = trial.suggest_float('weight_decay', 1e-4, 0.05, log=True)
-    batch_size = trial.suggest_categorical('batch_size', [32])  # Cố định 32 cho nhanh
+    batch_size = trial.suggest_categorical('batch_size', [32,64])  # Cố định 32 cho nhanh
     triplet_margin = trial.suggest_float('triplet_margin', 0.3, 1.0, step=0.1)
-    embedding_dim = trial.suggest_categorical('embedding_dim', [128])  # Cố định 128
+    embedding_dim = trial.suggest_categorical('embedding_dim', [128, 256, 512])  # Cố định 128
     svm_C = trial.suggest_float('svm_C', 0.05, 1.0, log=True)
     epochs = trial.suggest_int('epochs', 10, 20, step=5)
 
