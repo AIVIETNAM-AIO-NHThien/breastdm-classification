@@ -43,20 +43,20 @@ class BreastDMDataset(Dataset):
         # Lưu danh sách nhãn để sampler dùng
         self.labels = [s["label"] for s in self.samples]
 
+        # Augmentation giống data_loader thường (Resize 256 -> RandomCrop 224 -> Resize 96)
         if augment:
             self.augmentation = transforms.Compose([
                 transforms.Resize([256, 256]),          # Resize lên 256
                 transforms.RandomCrop(224),             # Crop 224
-                transforms.Resize([96, 96]),            # Resize về 96 cho model
+                transforms.Resize([96, 96]),            # Resize về 96
                 transforms.RandomHorizontalFlip(p=0.5),
                 transforms.RandomVerticalFlip(p=0.5),
-                # KHÔNG có ColorJitter (vì nhiều kênh > 3)
-                # KHÔNG có GaussianBlur
             ])
         else:
             self.augmentation = None
 
     def _build_samples(self) -> List[dict]:
+        # ... (giữ nguyên, không thay đổi) ...
         samples = []
         split_dir = os.path.join(self.root_dir, self.split)
         if not os.path.exists(split_dir):
@@ -124,6 +124,7 @@ class BreastDMDataset(Dataset):
         arr_norm = (arr_clipped - mean) / std
         return torch.from_numpy(arr_norm).float()
 
+    # ===== PHẦN QUAN TRỌNG NHẤT: SỬA LẠI HÀM __getitem__ =====
     def __getitem__(self, index: int) -> Tuple[torch.Tensor, int]:
         sample = self.samples[index]
         patient_dir = sample["patient_dir"]
@@ -137,7 +138,10 @@ class BreastDMDataset(Dataset):
         if self.augmentation is not None:
             img = self.augmentation(img)
 
-        # 3. Chuẩn hóa cường độ (z-score)
+        # 3. Resize về 96x96 (đảm bảo kích thước đồng nhất cho tất cả)
+        img = TF.resize(img, [96, 96])
+
+        # 4. Chuẩn hóa cường độ
         img = self._intensity_normalize(img)
 
         return img, label
