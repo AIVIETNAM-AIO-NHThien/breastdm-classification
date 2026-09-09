@@ -38,16 +38,23 @@ class BreastDMDataset(Dataset):
 
         self.num_channels = len(self.folders)
         self.label_dict = {"Benign": 0, "Malignant": 1}
-
-        # Khởi tạo RandomResizedCrop cho augmentation (scaling)
-        self.random_crop = transforms.RandomResizedCrop(
-            size=96, scale=(0.8, 1.0), ratio=(1.0, 1.0)
-        )
-
         self.samples = self._build_samples()
 
         # Lưu danh sách nhãn để sampler dùng
         self.labels = [s["label"] for s in self.samples]
+
+        if augment:
+            self.augmentation = transforms.Compose([
+                transforms.Resize([256, 256]),          # Resize lên 256
+                transforms.RandomCrop(224),             # Crop 224
+                transforms.Resize([96, 96]),            # Resize về 96 cho model
+                transforms.RandomHorizontalFlip(p=0.5),
+                transforms.RandomVerticalFlip(p=0.5),
+                # KHÔNG có ColorJitter (vì nhiều kênh > 3)
+                # KHÔNG có GaussianBlur
+            ])
+        else:
+            self.augmentation = None
 
     def _build_samples(self) -> List[dict]:
         samples = []
@@ -117,22 +124,6 @@ class BreastDMDataset(Dataset):
         arr_norm = (arr_clipped - mean) / std
         return torch.from_numpy(arr_norm).float()
 
-    def _augment(self, img: torch.Tensor) -> torch.Tensor:
-        # Random crop + resize (scaling) – dùng RandomResizedCrop
-        img = self.random_crop(img)
-
-        # Random horizontal flip
-        if torch.rand(1) > 0.5:
-            img = TF.hflip(img)
-        # Random vertical flip
-        if torch.rand(1) > 0.5:
-            img = TF.vflip(img)
-        # Random rotation (0, 90, 180, 270)
-        angle = torch.randint(0, 4, (1,)).item() * 90
-        if angle != 0:
-            img = TF.rotate(img, angle, fill=0.0)
-        return img
-
     def __getitem__(self, index: int) -> Tuple[torch.Tensor, int]:
         sample = self.samples[index]
         patient_dir = sample["patient_dir"]
@@ -142,15 +133,12 @@ class BreastDMDataset(Dataset):
         # 1. Đọc và xếp chồng kênh
         img = self._load_and_stack(patient_dir, slice_name)  # (C, H, W)
 
-        # 2. Augmentation (chỉ tập train, đã bao gồm resize về 96x96)
-        if self.augment:
-            img = self._augment(img)
+        # 2. Augmentation (chỉ train)
+        if self.augmentation is not None:
+            img = self.augmentation(img)
 
-        # 3. Chuẩn hóa cường độ
+        # 3. Chuẩn hóa cường độ (z-score)
         img = self._intensity_normalize(img)
-
-        # 4. Resize lần cuối (đảm bảo 96x96 cho cả val/test)
-        img = TF.resize(img, [96, 96])
 
         return img, label
 
