@@ -42,13 +42,14 @@ class BreastDMDataset(Dataset):
         self.label_dict = {"Benign": 0, "Malignant": 1}
         self.samples = self._build_samples()
 
-        # Augmentation chỉ cho train – cải tiến với scale rộng hơn và GaussianBlur
         if augment:
             self.augmentation = transforms.Compose([
-                transforms.RandomResizedCrop(96, scale=(0.6, 1.0), ratio=(0.9, 1.1)),
-                transforms.RandomHorizontalFlip(p=0.5),
-                transforms.RandomVerticalFlip(p=0.5),
-                transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 0.5)),
+            transforms.Resize([256, 256]),          
+            transforms.RandomCrop(224),
+            transforms.Resize([96, 96]),
+            transforms.RandomHorizontalFlip(p=0.5),
+            transforms.RandomVerticalFlip(p=0.5),
+            # transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 0.5)),
             ])
         else:
             self.augmentation = None
@@ -101,7 +102,6 @@ class BreastDMDataset(Dataset):
         return len(self.samples)
 
     def _load_and_stack(self, patient_dir: str, slice_name: str) -> torch.Tensor:
-        """Đọc tất cả các kênh và xếp chồng thành tensor (C, H, W)"""
         channels = []
         for folder in self.folders:
             img_path = os.path.join(patient_dir, folder, slice_name)
