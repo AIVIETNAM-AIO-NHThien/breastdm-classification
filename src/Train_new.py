@@ -124,7 +124,7 @@ if len(args.gpu.split(',')) > 1:
 # -------------------------------
 # Loss (thêm Label Smoothing)
 # -------------------------------
-criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
+criterion = nn.CrossEntropyLoss()
 
 # -------------------------------
 # Hàm tính Sensitivity và Specificity dùng Youden index
