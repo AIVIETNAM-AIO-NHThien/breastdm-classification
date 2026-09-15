@@ -138,9 +138,6 @@ class BreastDMDataset(Dataset):
         if self.augmentation is not None:
             img = self.augmentation(img)
 
-        # 3. Resize về 96x96 (đảm bảo kích thước đồng nhất cho tất cả)
-        img = TF.resize(img, [96, 96])
-
         # 4. Chuẩn hóa cường độ
         img = self._intensity_normalize(img)
 
