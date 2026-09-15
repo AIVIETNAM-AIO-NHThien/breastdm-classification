@@ -65,18 +65,21 @@ class NLBlockND(nn.Module):
         g_x = g_x.permute(0, 2, 1)
 
         if self.mode == "gaussian":
-            theta_x = x_thisBranch.view(batch_size, self.in_channels, -1)
-            phi_x = x_otherBranch.view(batch_size, self.in_channels, -1)
-            theta_x = theta_x.permute(0, 2, 1)
-            f = torch.matmul(theta_x, phi_x)
+            # Paper: θ từ C_in (x_otherBranch), Φ từ P (x_thisBranch)
+            theta_x = x_otherBranch.view(batch_size, self.in_channels, -1)
+            phi_x = x_thisBranch.view(batch_size, self.in_channels, -1)
+            theta_x = theta_x.permute(0, 2, 1)          # (B, HW, C)
+            f = torch.matmul(theta_x, phi_x)             # (B, HW, HW)
         elif self.mode == "embedded" or self.mode == "dot":
-            theta_x = self.theta(x_thisBranch).view(batch_size, self.inter_channels, -1)
-            phi_x = self.phi(x_otherBranch).view(batch_size, self.inter_channels, -1)
-            phi_x = phi_x.permute(0, 2, 1)
-            f = torch.matmul(phi_x, theta_x)
-        else:
-            theta_x = self.theta(x_thisBranch).view(batch_size, self.inter_channels, -1, 1)
-            phi_x = self.phi(x_otherBranch).view(batch_size, self.inter_channels, 1, -1)
+            # Paper: θ từ C_in (x_otherBranch), Φ từ P (x_thisBranch)
+            theta_x = self.theta(x_otherBranch).view(batch_size, self.inter_channels, -1)
+            phi_x = self.phi(x_thisBranch).view(batch_size, self.inter_channels, -1)
+            theta_x = theta_x.permute(0, 2, 1)          # (B, HW, C)
+            f = torch.matmul(theta_x, phi_x)             # (B, HW, HW)
+        else:  # concatenate
+            # Paper: θ từ C_in (x_otherBranch), Φ từ P (x_thisBranch)
+            theta_x = self.theta(x_otherBranch).view(batch_size, self.inter_channels, -1, 1)
+            phi_x = self.phi(x_thisBranch).view(batch_size, self.inter_channels, 1, -1)
             h = theta_x.size(2)
             w = phi_x.size(3)
             theta_x = theta_x.repeat(1, 1, 1, w)
