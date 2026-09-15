@@ -53,7 +53,9 @@ class BreastDMDataset(Dataset):
                 transforms.RandomVerticalFlip(p=0.5),
             ])
         else:
-            self.augmentation = None
+            self.augmentation = transforms.Compose([
+                transforms.Resize([96, 96]),])
+
 
     def _build_samples(self) -> List[dict]:
         # ... (giữ nguyên, không thay đổi) ...
@@ -137,6 +139,8 @@ class BreastDMDataset(Dataset):
         # 2. Augmentation (chỉ train)
         if self.augmentation is not None:
             img = self.augmentation(img)
+        else:
+            img = TF.resize(img, [96, 96])
 
         # 4. Chuẩn hóa cường độ
         img = self._intensity_normalize(img)
