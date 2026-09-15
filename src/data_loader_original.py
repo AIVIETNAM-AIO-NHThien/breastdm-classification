@@ -49,7 +49,6 @@ class BreastDMDataset(Dataset):
             transforms.Resize([96, 96]),
             transforms.RandomHorizontalFlip(p=0.5),
             transforms.RandomVerticalFlip(p=0.5),
-            # transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 0.5)),
             ])
         else:
             self.augmentation = None
@@ -131,9 +130,6 @@ class BreastDMDataset(Dataset):
 
         # 1. Đọc và xếp chồng kênh
         img = self._load_and_stack(patient_dir, slice_name)   # (C, H, W)
-
-        # 2. Resize về 96×96 (cố định cho tất cả)
-        img = TF.resize(img, [96, 96])        # (C, 96, 96)
 
         # 3. Augmentation (chỉ train): crop + flip + blur
         if self.augmentation is not None:
