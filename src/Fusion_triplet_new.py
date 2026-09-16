@@ -213,7 +213,8 @@ class FCUUp(nn.Module):
 
 # ======================== Main Fusion Model (LG‑CAFN) ========================
 class FusionM(nn.Module):
-    def __init__(self, num_classes=2, in_c=9, load_vit=False, embedding_dim=128):
+    def __init__(self, num_classes=2, in_c=9, load_vit=False, embedding_dim=128,
+                 dropout_fusion=0.3, dropout_emb=0.3):
         super(FusionM, self).__init__()
         self.in_c = in_c
         self.load_vit_flag = load_vit
@@ -271,15 +272,19 @@ class FusionM(nn.Module):
         self.Nlblock = NLBlockND(in_channels=512)
         self.fcuup = FCUUp(inplanes=768, outplanes=512, up_stride=2)
 
+        # ----- Dropout sau Fusion (trước classifier và embedding head) -----
+        self.fusion_dropout = nn.Dropout(p=dropout_fusion)   # ⭐ THÊM
+
         # ----- Classifier -----
         self.avgpool = nn.AdaptiveAvgPool2d(1)
         self.fc = nn.Linear(1024, num_classes)
 
-        # ----- Embedding head (cho triplet loss) -----
+        # ----- Embedding head (cho triplet loss) - có Dropout bên trong -----
         self.embedding_head = nn.Sequential(
             nn.Linear(1024, 512),
             nn.BatchNorm1d(512),
             nn.ReLU(inplace=True),
+            nn.Dropout(p=dropout_emb),                       # ⭐ THÊM
             nn.Linear(512, embedding_dim)
         )
 
@@ -359,6 +364,9 @@ class FusionM(nn.Module):
         pooled = self.avgpool(fused)              # (B, 1024, 1, 1)
         pooled = pooled.view(pooled.size(0), -1)  # (B, 1024)
 
+        # ⭐ Dropout sau fusion (áp dụng cho cả embedding và logits)
+        pooled = self.fusion_dropout(pooled)
+
         if return_embedding:
             emb = self.embedding_head(pooled)
             emb = F.normalize(emb, p=2, dim=1)
@@ -366,3 +374,27 @@ class FusionM(nn.Module):
 
         logits = self.fc(pooled)
         return logits
+
+
+# ======================== Test ========================
+if __name__ == '__main__':
+    print("Testing with 9 channels (Exp-1)...")
+    dummy = torch.rand(2, 9, 96, 96)
+    model = FusionM(num_classes=2, in_c=9, load_vit=False)
+    out = model(dummy)
+    print("Output (logits) shape:", out.shape)
+
+    emb = model(dummy, return_embedding=True)
+    print("Embedding shape:", emb.shape)
+    print("Embedding L2 norm:", emb.norm(dim=1))
+
+    print("\nTesting with 17 channels (Exp-2)...")
+    dummy17 = torch.rand(2, 17, 96, 96)
+    model17 = FusionM(num_classes=2, in_c=17, load_vit=False)
+    out17 = model17(dummy17)
+    print("Output (logits) shape:", out17.shape)
+
+    print("\nTesting with pretrained ViT weights...")
+    model_pretrained = FusionM(num_classes=2, in_c=17, load_vit=True)
+    out_pretrained = model_pretrained(dummy17)
+    print("Output (logits) shape:", out_pretrained.shape)
