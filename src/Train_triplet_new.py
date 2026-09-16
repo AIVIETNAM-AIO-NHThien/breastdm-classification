@@ -362,7 +362,7 @@ def train_with_margin(margin, args, train_loader, val_loader, test_loader, in_ch
         print(f'\n===== Epoch {epoch}/{args.epochs} =====')
 
         # Cập nhật learning rate
-        current_lr = max(args.lr * (0.1 ** (epoch // 10)), 1e-5)
+        current_lr = max(args.lr * (0.5 ** (epoch // 20)), 1e-5)
         for param_group in optimizer.param_groups:
             param_group['lr'] = current_lr
         print(f'Learning rate: {current_lr:.6f}')
