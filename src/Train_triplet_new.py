@@ -269,7 +269,6 @@ def train_one_epoch(epoch, model, loader, optimizer, criterion_ce, criterion_tri
                 total_triplet += loss_triplet.item() * data.size(0)
 
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
         total_loss += loss.item() * data.size(0)
 
