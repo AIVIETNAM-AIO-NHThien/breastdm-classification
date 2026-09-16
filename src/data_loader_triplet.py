@@ -51,6 +51,7 @@ class BreastDMDataset(Dataset):
                 transforms.Resize([96, 96]),            # Resize về 96
                 transforms.RandomHorizontalFlip(p=0.5),
                 transforms.RandomVerticalFlip(p=0.5),
+                transforms.RandomRotation(15), 
             ])
         else:
             self.augmentation = transforms.Compose([
