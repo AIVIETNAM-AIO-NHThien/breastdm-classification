@@ -31,7 +31,7 @@ def set_seed(seed):
 
 
 # ============================================================
-# TRIplet LOSS (copy từ Train_triplet.py)
+# TRIPLET LOSS (copy từ Train_triplet.py)
 # ============================================================
 def batch_semihard_triplet_loss(embeddings, labels, margin):
     """
@@ -110,21 +110,27 @@ def objective(trial):
     Mỗi trial: Optuna chọn 1 bộ siêu tham số, chạy huấn luyện và đánh giá.
     Trả về validation AUC để tối đa hóa.
     """
-    # ===== 1. KHÔNG GIAN TÌM KIẾM (thu hẹp để chạy nhanh) =====
+    # ===== 1. KHÔNG GIAN TÌM KIẾM =====
     lr = trial.suggest_float('lr', 1e-4, 0.01, log=True)
     weight_decay = trial.suggest_float('weight_decay', 1e-4, 0.05, log=True)
-    batch_size = trial.suggest_categorical('batch_size', [32,64])  # Cố định 32 cho nhanh
+    batch_size = trial.suggest_categorical('batch_size', [32, 64])
     triplet_margin = trial.suggest_float('triplet_margin', 0.3, 1.0, step=0.1)
-    embedding_dim = trial.suggest_categorical('embedding_dim', [128, 256, 512])  # Cố định 128
+    embedding_dim = trial.suggest_categorical('embedding_dim', [128, 256, 512])
     svm_C = trial.suggest_float('svm_C', 0.05, 1.0, log=True)
     epochs = trial.suggest_int('epochs', 10, 20, step=5)
+
+    # ===== ⭐ THÊM: TÌM KIẾM DROPOUT =====
+    dropout_fusion = trial.suggest_float('dropout_fusion', 0.0, 0.5, step=0.1)
+    dropout_emb = trial.suggest_float('dropout_emb', 0.0, 0.5, step=0.1)
+    # =====================================
 
     print(f"\n🔍 Trial {trial.number}:")
     print(f"   lr={lr:.6f}, wd={weight_decay:.6f}, batch={batch_size}, margin={triplet_margin}")
     print(f"   emb_dim={embedding_dim}, svm_C={svm_C:.4f}, epochs={epochs}")
+    print(f"   dropout_fusion={dropout_fusion}, dropout_emb={dropout_emb}")
 
     # ===== 2. SEED + DATALOADER =====
-    set_seed(42 + trial.number)  # Mỗi trial dùng seed khác nhau
+    set_seed(42 + trial.number)
     train_loader, val_loader, _ = create_dataloaders(
         root_dir='/kaggle/input/roi-classification',
         experiment='Exp-1',
@@ -133,12 +139,14 @@ def objective(trial):
         use_triplet=True
     )
 
-    # ===== 3. MODEL =====
+    # ===== 3. MODEL (truyền dropout vào) =====
     model = FusionM(
         num_classes=2,
         in_c=9,
         load_vit=True,
-        embedding_dim=embedding_dim
+        embedding_dim=embedding_dim,
+        dropout_fusion=dropout_fusion,   # ⭐ THÊM
+        dropout_emb=dropout_emb          # ⭐ THÊM
     )
     model.path = './model/vit_base_patch16_224_in21k.pth'
     model = model.cuda()
@@ -186,27 +194,37 @@ if __name__ == "__main__":
     # Tạo study (lưu vào SQLite database)
     study = optuna.create_study(
         direction='maximize',          # Tối đa hóa validation AUC
-        study_name='triplet_fusion_optuna_v2',
-        storage='sqlite:///triplet_optuna.db',
+        study_name='triplet_fusion_optuna_v3',   # ⭐ Đổi tên để không conflict
+        storage='sqlite:///triplet_optuna_v3.db', # ⭐ Database mới
         load_if_exists=True,
         sampler=optuna.samplers.TPESampler(seed=42)
     )
 
     print("="*60)
-    print("🚀 BẮT ĐẦU TỐI ƯU HÓA VỚI OPTUNA")
+    print("🚀 BẮT ĐẦU TỐI ƯU HÓA VỚI OPTUNA (có tìm Dropout)")
     print("="*60)
-    print(f"   Study name: triplet_fusion_optuna_v2")
-    print(f"   Database: triplet_optuna.db")
+    print(f"   Study name: triplet_fusion_optuna_v3")
+    print(f"   Database: triplet_optuna_v3.db")
     print(f"   Sampler: TPE (seed=42)")
     print(f"   Direction: maximize validation AUC")
+    print(f"   Search space:")
+    print(f"     - lr: [1e-4, 0.01] (log)")
+    print(f"     - weight_decay: [1e-4, 0.05] (log)")
+    print(f"     - batch_size: [32, 64]")
+    print(f"     - triplet_margin: [0.3, 1.0]")
+    print(f"     - embedding_dim: [128, 256, 512]")
+    print(f"     - svm_C: [0.05, 1.0] (log)")
+    print(f"     - epochs: [10, 20]")
+    print(f"     - dropout_fusion: [0.0, 0.5] ⭐")
+    print(f"     - dropout_emb: [0.0, 0.5] ⭐")
     print("="*60)
 
     # ===== CHẠY OPTUNA =====
     study.optimize(
         objective,
-        n_trials=25,           # 25 lần thử
-        timeout=14400,         # 4 giờ (14400 giây)
-        n_jobs=1               # 1 GPU
+        n_trials=25,
+        timeout=14400,         # 4 giờ
+        n_jobs=1
     )
 
     # ===== KẾT QUẢ =====
@@ -223,8 +241,8 @@ if __name__ == "__main__":
     # ===== LƯU KẾT QUẢ =====
     import pandas as pd
     df = study.trials_dataframe()
-    df.to_csv('optuna_results_triplet.csv', index=False)
-    print("\n✅ Đã lưu kết quả vào optuna_results_triplet.csv")
+    df.to_csv('optuna_results_triplet_v3.csv', index=False)
+    print("\n✅ Đã lưu kết quả vào optuna_results_triplet_v3.csv")
 
     # ===== IN RA LỆNH CHẠY TRAIN ĐẦY ĐỦ =====
     print("\n" + "="*60)
@@ -249,5 +267,11 @@ conda run -n py39 python Train_triplet.py \\
     --save-dir /kaggle/working/checkpoints
 """)
 
+    # ⭐ GỢI Ý: Thêm 2 tham số dropout vào Train_triplet.py nếu muốn dùng
     print("="*60)
+    print("💡 LƯU Ý: Để dùng dropout tối ưu trong Train_triplet.py,")
+    print("   cần thêm 2 argument --dropout-fusion và --dropout-emb")
+    print(f"   Giá trị tối ưu: dropout_fusion={best['dropout_fusion']}, dropout_emb={best['dropout_emb']}")
+    print("="*60)
+
     print("✅ HOÀN THÀNH! Chúc bạn thành công! 🚀")
