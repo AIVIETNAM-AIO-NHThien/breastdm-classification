@@ -201,7 +201,7 @@ class FusionM(nn.Module):
     def __init__(self, num_classes=2, in_c=9, load_vit=False, vit_path=None, img_size=96, patch_size=16):
         super(FusionM, self).__init__()
 
-        # ==================== SE‑ResNet50 branch (pretrainedmodels) ====================
+        # SE‑ResNet50 branch  
         model_se = pretrainedmodels.se_resnet50(pretrained='imagenet')
         
         # Sửa conv1 để nhận in_c kênh
@@ -217,9 +217,8 @@ class FusionM(nn.Module):
                 new_conv.weight[:, i] = mean_w[:, 0]
         model_se.conv1 = new_conv
 
-        # Tạo layer0 - LƯU Ý: pretrainedmodels dùng .relu chứ không phải .act1
         self.layer0 = nn.Sequential(
-            new_conv,                 # <--- Dùng new_conv đã được sửa
+            new_conv,                 
             model_se.layer0[1],       # bn1
             model_se.layer0[2],       # relu
             model_se.layer0[3]        # maxpool
@@ -232,16 +231,13 @@ class FusionM(nn.Module):
 
         # ===== ĐÓNG BĂNG TOÀN BỘ ViT =====
         for param in self.vit.parameters():
-            param.requires_grad = False
+            param.requires_grad = True
 
         # ==================== Non‑local + Fusion ====================
         self.Nlblock = NLBlockND(in_channels=512)
         self.fcuup = FCUUp(inplanes=768, outplanes=512, up_stride=2)
         self.relu = nn.ReLU(inplace=True)
         self.avgpool = nn.AdaptiveAvgPool2d(1)
-
-        # ===== THÊM DROPOUT SAU FUSION =====
-        self.fusion_dropout = nn.Dropout(p=0.3)
 
         self.fc = nn.Linear(1024, num_classes)
         if load_vit and vit_path is not None:
@@ -313,7 +309,6 @@ class FusionM(nn.Module):
 
         out = self.avgpool(out)
         out = out.view(out.size(0), -1)
-        out = self.fusion_dropout(out)          # Dropout để chống overfit
         out = self.fc(out)
         return out
 
