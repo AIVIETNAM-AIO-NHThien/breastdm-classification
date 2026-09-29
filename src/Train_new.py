@@ -121,9 +121,6 @@ model = model.to(device)
 if len(args.gpu.split(',')) > 1:
     model = torch.nn.DataParallel(model, device_ids=list(range(len(args.gpu.split(',')))))
 
-# -------------------------------
-# Loss (thêm Label Smoothing)
-# -------------------------------
 criterion = nn.CrossEntropyLoss()
 
 # -------------------------------
@@ -154,8 +151,6 @@ def train_one_epoch(epoch, model, loader, optimizer, criterion, device):
         output = model(data)
         loss = criterion(output, target)
         loss.backward()
-        # Gradient clipping để ổn định
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
 
         total_loss += loss.item() * data.size(0)
@@ -236,7 +231,6 @@ for epoch in range(1, args.epochs + 1):
     current_lr = max(args.lr * (0.1 ** (epoch // 10)), 1e-5)
     print(f'Learning rate: {current_lr:.6f}')
 
-    # Chỉ train các tham số có requires_grad=True (ViT đã bị đóng băng trong FusionM)
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     optimizer = optim.SGD(
         trainable_params,
