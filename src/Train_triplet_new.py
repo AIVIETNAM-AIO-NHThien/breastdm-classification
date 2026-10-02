@@ -349,11 +349,13 @@ def train_with_margin(margin, args, train_loader, val_loader, test_loader, in_ch
         model = torch.nn.DataParallel(model, device_ids=list(range(len(args.gpu.split(',')))))
 
     # Loss và Optimizer
-    criterion_ce = nn.CrossEntropyLoss()
-    optimizer = optim.SGD(model.parameters(),
-                          lr=args.lr,
-                          momentum=args.momentum,
-                          weight_decay=args.weight_decay)
+    trainable_params = [p for p in model.parameters() if p.requires_grad]
+    optimizer = optim.SGD(
+        trainable_params,
+        lr=current_lr,
+        momentum=args.momentum,
+        weight_decay=args.weight_decay
+    )
 
     best_val_auc = 0.0
     best_epoch = -1
