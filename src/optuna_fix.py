@@ -14,7 +14,7 @@ import torch.optim as optim
 from sklearn.metrics import roc_auc_score
 from sklearn.svm import SVC
 from data_loader_triplet_fix import create_dataloaders
-from Fusion_triplet_fix import FusionM
+from Fusion_triplet_new import FusionM
 
 
 # ============================================================
