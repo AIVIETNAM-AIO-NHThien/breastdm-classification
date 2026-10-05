@@ -10,7 +10,7 @@ from sklearn.metrics import accuracy_score, roc_auc_score, roc_curve, confusion_
 from sklearn.svm import SVC
 
 # Import data loader và model
-from data_loader_triplet import create_dataloaders
+from data_loader_triplet_fix import create_dataloaders
 from Fusion_triplet_new import FusionM
 
 
