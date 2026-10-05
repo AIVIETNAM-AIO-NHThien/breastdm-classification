@@ -14,9 +14,8 @@ from sklearn.svm import SVC
 from data_loader_triplet import create_dataloaders
 from Fusion_triplet_new import FusionM
 
-
 # -------------------------------
-# Hàm tính Sensitivity và Specificity dùng Youden index
+# Hàm tính Sensitivity và Specificity dùng Youden index (giống Train.py)
 # -------------------------------
 def calc_sens_spec_youden(all_labels, all_probs):
     """Tính Sensitivity, Specificity tại ngưỡng tối ưu theo Youden index."""
@@ -52,7 +51,7 @@ parser.add_argument('--vit-path', type=str, default='./model/vit_base_patch16_22
 parser.add_argument('--save-dir', type=str, default='checkpoints', help='directory to save model checkpoints')
 parser.add_argument('--num-workers', type=int, default=4, help='number of data loading workers')
 
-# Tham số cho triplet loss
+# Tham số cho triplet loss - cho phép nhiều giá trị margin
 parser.add_argument('--triplet-margin', type=float, nargs='+', default=[1.0],
                     help='margin for triplet loss, can provide multiple values')
 parser.add_argument('--use-triplet', action='store_true', default=False,
@@ -80,9 +79,7 @@ def set_seed(seed):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-
 set_seed(args.seed)
-
 # -------------------------------
 # Thiết bị GPU
 # -------------------------------
@@ -101,7 +98,7 @@ else:
     raise ValueError('Unknown experiment')
 
 # -------------------------------
-# Tạo DataLoader
+# Tạo DataLoader (dùng chung cho tất cả margin)
 # -------------------------------
 train_loader, val_loader, test_loader = create_dataloaders(
     root_dir=args.data_root,
@@ -115,9 +112,8 @@ print(f"Train samples: {len(train_loader.dataset)}")
 print(f"Val samples:   {len(val_loader.dataset)}")
 print(f"Test samples:  {len(test_loader.dataset)}")
 
-
 # -------------------------------
-# Semi-hard triplet loss
+# Semi-hard triplet loss (không có default margin)
 # -------------------------------
 def batch_semihard_triplet_loss(embeddings, labels, margin):
     pairwise_dist = torch.cdist(embeddings, embeddings, p=2)
@@ -149,7 +145,6 @@ def batch_semihard_triplet_loss(embeddings, labels, margin):
     else:
         loss = torch.tensor(0.0, device=embeddings.device, requires_grad=True)
     return loss
-
 
 # -------------------------------
 # Hàm đánh giá (dùng Youden index) – dành cho CE và CE+Triplet
@@ -200,7 +195,6 @@ def evaluate(model, loader, criterion_ce, device, target_name='Val'):
 
     return avg_loss, acc, auc, sens_youden, spec_youden
 
-
 # -------------------------------
 # Hàm đánh giá bằng SVM trên embedding (dùng cho only_triplet)
 # -------------------------------
@@ -232,17 +226,16 @@ def evaluate_embedding_svm(model, train_loader, val_loader, device, kernel='rbf'
     acc = accuracy_score(y_val, y_pred)
     auc = roc_auc_score(y_val, y_proba)
     cm = confusion_matrix(y_val, y_pred)
-    TN, FP = cm[0, 0], cm[0, 1]
-    FN, TP = cm[1, 0], cm[1, 1]
+    TN, FP = cm[0,0], cm[0,1]
+    FN, TP = cm[1,0], cm[1,1]
     sens = TP / (TP + FN) if (TP + FN) > 0 else 0.0
     spec = TN / (TN + FP) if (TN + FP) > 0 else 0.0
 
     print(f'SVM (kernel={kernel}, C={C}) on Val: Acc: {acc*100:.2f}%, AUC: {auc:.4f}, Sens: {sens:.4f}, Spec: {spec:.4f}')
     return acc * 100, auc, sens, spec
 
-
 # -------------------------------
-# Hàm huấn luyện một epoch
+# Hàm huấn luyện một epoch (nhận tham số margin)
 # -------------------------------
 def train_one_epoch(epoch, model, loader, optimizer, criterion_ce, criterion_triplet, device, args, margin):
     model.train()
@@ -276,8 +269,6 @@ def train_one_epoch(epoch, model, loader, optimizer, criterion_ce, criterion_tri
                 total_triplet += loss_triplet.item() * data.size(0)
 
         loss.backward()
-        # Gradient clipping để ổn định training
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
         total_loss += loss.item() * data.size(0)
 
@@ -297,9 +288,8 @@ def train_one_epoch(epoch, model, loader, optimizer, criterion_ce, criterion_tri
         print(f'Train Epoch: {epoch} - Avg loss: {avg_loss:.4f}, CE: {avg_ce:.4f}, Triplet: {avg_triplet:.4f}, Accuracy: {acc:.2f}%')
         return avg_loss, acc
 
-
 # -------------------------------
-# Hàm đánh giá cuối cùng bằng SVM cho test
+# Hàm đánh giá cuối cùng bằng SVM cho test (chỉ dùng only_triplet)
 # -------------------------------
 def evaluate_final_svm(model, train_loader, test_loader, device, kernel='rbf', C=args.svm_C):
     model.eval()
@@ -325,8 +315,8 @@ def evaluate_final_svm(model, train_loader, test_loader, device, kernel='rbf', C
     acc = accuracy_score(y_test, y_pred) * 100
     auc = roc_auc_score(y_test, y_proba)
     cm = confusion_matrix(y_test, y_pred)
-    TN, FP = cm[0, 0], cm[0, 1]
-    FN, TP = cm[1, 0], cm[1, 1]
+    TN, FP = cm[0,0], cm[0,1]
+    FN, TP = cm[1,0], cm[1,1]
     sens = TP / (TP + FN) if (TP + FN) > 0 else 0.0
     spec = TN / (TN + FP) if (TN + FP) > 0 else 0.0
     print(f'Test set (SVM): Accuracy: {acc:.2f}%, AUC: {auc:.4f}, Sens: {sens:.4f}, Spec: {spec:.4f}')
@@ -334,7 +324,6 @@ def evaluate_final_svm(model, train_loader, test_loader, device, kernel='rbf', C
     print('Confusion Matrix:')
     print(cm)
     return acc, auc
-
 
 # -------------------------------
 # Hàm huấn luyện cho một margin cụ thể
@@ -359,35 +348,28 @@ def train_with_margin(margin, args, train_loader, val_loader, test_loader, in_ch
     if len(args.gpu.split(',')) > 1:
         model = torch.nn.DataParallel(model, device_ids=list(range(len(args.gpu.split(',')))))
 
-    # ===== LOSS =====
+    # Loss và Optimizer
     criterion_ce = nn.CrossEntropyLoss()
+    optimizer = optim.SGD(model.parameters(),
+                          lr=args.lr,
+                          momentum=args.momentum,
+                          weight_decay=args.weight_decay)
 
     best_val_auc = 0.0
     best_epoch = -1
 
-    # ===== VÒNG LẶP EPOCH =====
     for epoch in range(1, args.epochs + 1):
         print(f'\n===== Epoch {epoch}/{args.epochs} =====')
 
-        # 1. Tính learning rate
+        # Cập nhật learning rate
         current_lr = max(args.lr * (0.5 ** (epoch // 20)), 1e-5)
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = current_lr
         print(f'Learning rate: {current_lr:.6f}')
 
-        # 2. Tạo optimizer (chỉ lấy params có requires_grad=True)
-        trainable_params = [p for p in model.parameters() if p.requires_grad]
-        optimizer = optim.SGD(
-            trainable_params,
-            lr=current_lr,
-            momentum=args.momentum,
-            weight_decay=args.weight_decay
-        )
-        print(f"Trainable parameters: {sum(p.numel() for p in trainable_params):,}")
-
-        # 3. Train một epoch
         train_loss, train_acc = train_one_epoch(epoch, model, train_loader, optimizer,
                                                 criterion_ce, None, device, args, margin)
 
-        # 4. Đánh giá validation
         if args.only_triplet:
             if args.eval_embedding:
                 val_acc, val_auc, val_sens, val_spec = evaluate_embedding_svm(
@@ -402,6 +384,7 @@ def train_with_margin(margin, args, train_loader, val_loader, test_loader, in_ch
                     torch.save(state_dict, save_path)
                     print(f'Checkpoint saved to {save_path} (val AUC: {val_auc:.4f})')
             else:
+                # Nếu không đánh giá, lưu theo train loss (cần khai báo best_val_loss)
                 if 'best_val_loss' not in locals():
                     best_val_loss = float('inf')
                 if train_loss < best_val_loss:
@@ -452,19 +435,19 @@ def train_with_margin(margin, args, train_loader, val_loader, test_loader, in_ch
     with open(log_file, 'w') as f:
         f.write(f"Margin: {margin}\n")
         f.write(f"Best validation AUC: {best_val_auc:.4f} at epoch {best_epoch}\n")
+        # Bạn có thể thêm các chỉ số khác nếu muốn
     print(f'Results saved to {log_file}')
-
 
 # -------------------------------
 # HÀM CHÍNH
 # -------------------------------
 def main():
+    # Danh sách margin lấy từ args
     margin_list = args.triplet_margin
     print(f"Will run with margins: {margin_list}")
 
     for margin in margin_list:
         train_with_margin(margin, args, train_loader, val_loader, test_loader, in_channels, device)
-
 
 if __name__ == "__main__":
     main()

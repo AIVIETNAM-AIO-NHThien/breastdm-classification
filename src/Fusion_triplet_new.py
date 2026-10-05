@@ -227,9 +227,6 @@ class FusionM(nn.Module):
         )
         if self.load_vit_flag:
             self._load_pretrained_vit()
-            
-        for param in self.vit.parameters():
-            param.requires_grad = True
 
         # ==================== CNN branch (pretrainedmodels) ====================
         # Tắt SSL check (phòng trường hợp vẫn cần tải)
@@ -276,7 +273,7 @@ class FusionM(nn.Module):
         self.fcuup = FCUUp(inplanes=768, outplanes=512, up_stride=2)
 
         # ----- Dropout sau Fusion (trước classifier và embedding head) -----
-        self.fusion_dropout = nn.Dropout(p=dropout_fusion)   
+        self.fusion_dropout = nn.Dropout(p=dropout_fusion)   # ⭐ THÊM
 
         # ----- Classifier -----
         self.avgpool = nn.AdaptiveAvgPool2d(1)
@@ -287,7 +284,7 @@ class FusionM(nn.Module):
             nn.Linear(1024, 512),
             nn.BatchNorm1d(512),
             nn.ReLU(inplace=True),
-            nn.Dropout(p=dropout_emb),                      
+            nn.Dropout(p=dropout_emb),                       # ⭐ THÊM
             nn.Linear(512, embedding_dim)
         )
 
