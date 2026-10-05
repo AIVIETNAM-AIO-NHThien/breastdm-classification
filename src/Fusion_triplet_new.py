@@ -229,7 +229,7 @@ class FusionM(nn.Module):
             self._load_pretrained_vit()
             
         for param in self.vit.parameters():
-            param.requires_grad = False
+            param.requires_grad = True
 
         # ==================== CNN branch (pretrainedmodels) ====================
         # Tắt SSL check (phòng trường hợp vẫn cần tải)
