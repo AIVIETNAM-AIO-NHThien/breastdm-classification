@@ -8,6 +8,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 from collections import defaultdict
 import json
+import joblib                                    # ⚠️ THÊM: để lưu SVM
 from sklearn.metrics import accuracy_score, roc_auc_score, roc_curve, confusion_matrix, classification_report
 from sklearn.svm import SVC
 
@@ -48,55 +49,42 @@ def compute_metrics(y_true, y_pred, probs=None):
 
 
 # ============================================================
-# HELPER: Tính patient-level metrics với 3 cách aggregate
+# HELPER: Tính patient-level metrics — CHỈ MAJORITY VOTING
 # ============================================================
-def compute_patient_level_metrics(y_pred, y_proba, y_true, patient_ids, threshold=0.5):
+def compute_patient_level_metrics_majority(y_pred, y_proba, y_true, patient_ids):
     """
     Tổng hợp predictions từ slice-level lên patient-level.
+    CHỈ dùng MAJORITY VOTING.
     
     Args:
         y_pred: (N,) slice-level predictions
         y_proba: (N,) slice-level probabilities cho class Malignant
         y_true: (N,) slice-level true labels
         patient_ids: (N,) patient ID cho mỗi slice
-        threshold: ngưỡng phân loại
     
     Returns:
-        metrics: dict cho 3 cách aggregate (average, majority, max)
+        metrics: dict cho majority voting
         pids: list patient IDs
         y_patient: (P,) nhãn patient-level
     """
     # Nhóm theo patient
-    patient_probas = defaultdict(list)
     patient_votes = defaultdict(list)
     patient_true = {}
     
-    for pred, proba, true, pid in zip(y_pred, y_proba, y_true, patient_ids):
-        patient_probas[pid].append(float(proba))
+    for pred, true, pid in zip(y_pred, y_true, patient_ids):
         patient_votes[pid].append(int(pred))
         patient_true[pid] = int(true)
     
-    pids = list(patient_probas.keys())
+    pids = list(patient_votes.keys())
     y_patient = np.array([patient_true[pid] for pid in pids])
     
-    metrics = {}
-    
-    # ===== Cách 1: Average probability =====
-    probs_avg = np.array([np.mean(patient_probas[pid]) for pid in pids])
-    preds_avg = (probs_avg >= threshold).astype(int)
-    metrics['average'] = compute_metrics(y_patient, preds_avg, probs_avg)
-    
-    # ===== Cách 2: Majority voting =====
+    # ===== Majority voting =====
     probs_maj = np.array([np.mean(patient_votes[pid]) for pid in pids])
     preds_maj = (probs_maj >= 0.5).astype(int)
-    metrics['majority'] = compute_metrics(y_patient, preds_maj, probs_maj)
     
-    # ===== Cách 3: Max probability =====
-    probs_max = np.array([max(patient_probas[pid]) for pid in pids])
-    preds_max = (probs_max >= threshold).astype(int)
-    metrics['max'] = compute_metrics(y_patient, preds_max, probs_max)
-    
-    return metrics, pids, y_patient
+    return {
+        'majority': compute_metrics(y_patient, preds_maj, probs_maj)
+    }, pids, y_patient
 
 
 # ============================================================
@@ -285,12 +273,11 @@ def evaluate(model, loader, criterion_ce, device, target_name='Val'):
 
 
 # -------------------------------
-# Hàm đánh giá SVM trên embedding (val) — BỔ SUNG patient-level
+# Hàm đánh giá SVM trên embedding (val)
 # -------------------------------
 def evaluate_embedding_svm(model, train_loader, val_loader, device, kernel='rbf', C=args.svm_C):
     """
     Đánh giá SVM trên val set.
-    ĐÃ BỔ SUNG: Patient-level metrics cho val.
     """
     model.eval()
     train_embs, train_labels = [], []
@@ -309,7 +296,6 @@ def evaluate_embedding_svm(model, train_loader, val_loader, device, kernel='rbf'
             val_embs.append(emb)
             val_labels.append(target.numpy())
 
-            # Thu thập patient IDs
             bs = data.size(0)
             for i in range(bs):
                 idx = slice_offset + i
@@ -341,16 +327,15 @@ def evaluate_embedding_svm(model, train_loader, val_loader, device, kernel='rbf'
     print(f'SVM (kernel={kernel}, C={C}) on Val [SLICE]: '
           f'Acc: {acc * 100:.2f}%, AUC: {auc:.4f}, Sens: {sens:.4f}, Spec: {spec:.4f}')
 
-    # ===== PATIENT-LEVEL =====
+    # ===== PATIENT-LEVEL (MAJORITY ONLY) =====
     if len(np.unique(val_patient_ids)) > 1:
-        pl_metrics, pids, y_patient = compute_patient_level_metrics(
+        pl_metrics, pids, y_patient = compute_patient_level_metrics_majority(
             y_pred, y_proba, y_val, val_patient_ids
         )
         print(f'  → [PATIENT-LEVEL] Số patients: {len(pids)}')
-        for method in ['average', 'majority', 'max']:
-            m = pl_metrics[method]
-            print(f'     {method:<10}: Acc={m["acc"]:.2f}%, AUC={m["auc"]:.4f}, '
-                  f'Sens={m["sens"]:.4f}, Spec={m["spec"]:.4f}')
+        m = pl_metrics['majority']
+        print(f'     majority  : Acc={m["acc"]:.2f}%, AUC={m["auc"]:.4f}, '
+              f'Sens={m["sens"]:.4f}, Spec={m["spec"]:.4f}')
 
     return acc * 100, auc, sens, spec
 
@@ -412,12 +397,14 @@ def train_one_epoch(epoch, model, loader, optimizer, criterion_ce, criterion_tri
 
 
 # -------------------------------
-# Hàm đánh giá cuối cùng bằng SVM cho test — ĐÃ BỔ SUNG PATIENT-LEVEL
+# Hàm đánh giá cuối cùng bằng SVM cho test — LƯU SVM
 # -------------------------------
-def evaluate_final_svm(model, train_loader, test_loader, device, kernel='rbf', C=args.svm_C):
+def evaluate_final_svm(model, train_loader, test_loader, device,
+                       kernel='rbf', C=args.svm_C, save_svm_path=None):
     """
     Đánh giá cuối cùng trên test set.
-    ĐÃ BỔ SUNG: Patient-level metrics với 3 cách aggregate.
+    ⚠️ ĐÃ SỬA: Lưu SVM vào file .pkl.
+    ⚠️ CHỈ dùng majority voting.
     """
     model.eval()
     train_embs, train_labels = [], []
@@ -458,6 +445,14 @@ def evaluate_final_svm(model, train_loader, test_loader, device, kernel='rbf', C
 
     clf = SVC(kernel=kernel, C=C, probability=True, random_state=42)
     clf.fit(X_train, y_train)
+
+    # ===== ⚠️ LƯU SVM =====
+    if save_svm_path is not None:
+        joblib.dump(clf, save_svm_path)
+        print(f'✅ SVM saved to {save_svm_path}')
+        print(f'   Support vectors: {len(clf.support_vectors_)}')
+        print(f'   File size: {os.path.getsize(save_svm_path) / 1024:.2f} KB')
+
     y_pred = clf.predict(X_test)
     y_proba = clf.predict_proba(X_test)[:, 1]
 
@@ -475,12 +470,12 @@ def evaluate_final_svm(model, train_loader, test_loader, device, kernel='rbf', C
     print()
     print(classification_report(y_test, y_pred, target_names=['Benign', 'Malignant'], digits=4))
 
-    # ============ PATIENT-LEVEL ============
+    # ============ PATIENT-LEVEL (MAJORITY ONLY) ============
     print("\n" + "=" * 60)
-    print("PATIENT-LEVEL METRICS")
+    print("PATIENT-LEVEL METRICS (MAJORITY VOTING)")
     print("=" * 60)
 
-    patient_metrics, pids, y_patient = compute_patient_level_metrics(
+    patient_metrics, pids, y_patient = compute_patient_level_metrics_majority(
         y_pred, y_proba, y_test, test_patient_ids
     )
 
@@ -488,16 +483,15 @@ def evaluate_final_svm(model, train_loader, test_loader, device, kernel='rbf', C
     print(f"Nhãn: {np.bincount(y_patient)} (Benign, Malignant)")
     print()
 
-    for method in ['average', 'majority', 'max']:
-        m = patient_metrics[method]
-        print(f"--- {method.upper()} ---")
-        print(f"  Accuracy:    {m['acc']:.2f}%")
-        print(f"  AUC:         {m['auc']:.4f}")
-        print(f"  Sensitivity: {m['sens']:.4f}")
-        print(f"  Specificity: {m['spec']:.4f}")
-        print()
+    m = patient_metrics['majority']
+    print(f"--- MAJORITY ---")
+    print(f"  Accuracy:    {m['acc']:.2f}%")
+    print(f"  AUC:         {m['auc']:.4f}")
+    print(f"  Sensitivity: {m['sens']:.4f}")
+    print(f"  Specificity: {m['spec']:.4f}")
+    print()
 
-    # ============ SO SÁNH 3 CÁCH ============
+    # ============ SO SÁNH SLICE vs PATIENT ============
     print("=" * 60)
     print("SO SÁNH SLICE-LEVEL VÀ PATIENT-LEVEL")
     print("=" * 60)
@@ -505,12 +499,10 @@ def evaluate_final_svm(model, train_loader, test_loader, device, kernel='rbf', C
     print("-" * 60)
     print(f"{'Slice-level':<20} {slice_metrics['acc']:>9.2f}% {slice_metrics['auc']:>10.4f} "
           f"{slice_metrics['sens']:>10.4f} {slice_metrics['spec']:>10.4f}")
-    for method in ['average', 'majority', 'max']:
-        m = patient_metrics[method]
-        print(f"{'Patient-' + method:<20} {m['acc']:>9.2f}% {m['auc']:>10.4f} "
-              f"{m['sens']:>10.4f} {m['spec']:>10.4f}")
+    print(f"{'Patient-majority':<20} {m['acc']:>9.2f}% {m['auc']:>10.4f} "
+          f"{m['sens']:>10.4f} {m['spec']:>10.4f}")
 
-    # Trả về dict đầy đủ
+    # Trả về dict
     return {
         'slice_level': {
             'acc': slice_metrics['acc'],
@@ -519,13 +511,12 @@ def evaluate_final_svm(model, train_loader, test_loader, device, kernel='rbf', C
             'spec': slice_metrics['spec'],
         },
         'patient_level': {
-            method: {
-                'acc': patient_metrics[method]['acc'],
-                'auc': patient_metrics[method]['auc'],
-                'sens': patient_metrics[method]['sens'],
-                'spec': patient_metrics[method]['spec'],
+            'majority': {
+                'acc': m['acc'],
+                'auc': m['auc'],
+                'sens': m['sens'],
+                'spec': m['spec'],
             }
-            for method in ['average', 'majority', 'max']
         }
     }
 
@@ -618,8 +609,15 @@ def train_with_margin(margin, args, train_loader, val_loader, test_loader, in_ch
         model_test = model_test.to(device)
         if len(args.gpu.split(',')) > 1:
             model_test = torch.nn.DataParallel(model_test)
-        test_results = evaluate_final_svm(model_test, train_loader, test_loader, device,
-                                          kernel='rbf', C=args.svm_C)
+
+        # ⚠️ ĐƯỜNG DẪN LƯU SVM
+        svm_save_path = os.path.join(save_dir, f'svm_rbf_triplet_{args.experiment}.pkl')
+
+        test_results = evaluate_final_svm(
+            model_test, train_loader, test_loader, device,
+            kernel='rbf', C=args.svm_C,
+            save_svm_path=svm_save_path                # ← Truyền đường dẫn
+        )
     else:
         best_model_path = os.path.join(save_dir, f'best_model_ce_{args.experiment}.pth')
         if os.path.exists(best_model_path):
@@ -646,14 +644,12 @@ def train_with_margin(margin, args, train_loader, val_loader, test_loader, in_ch
             f.write(f"AUC:         {sl['auc']:.4f}\n")
             f.write(f"Sensitivity: {sl['sens']:.4f}\n")
             f.write(f"Specificity: {sl['spec']:.4f}\n")
-            f.write("\n=== PATIENT-LEVEL ===\n")
-            for method in ['average', 'majority', 'max']:
-                pl = test_results['patient_level'][method]
-                f.write(f"--- {method.upper()} ---\n")
-                f.write(f"  Accuracy:    {pl['acc']:.2f}%\n")
-                f.write(f"  AUC:         {pl['auc']:.4f}\n")
-                f.write(f"  Sensitivity: {pl['sens']:.4f}\n")
-                f.write(f"  Specificity: {pl['spec']:.4f}\n")
+            f.write("\n=== PATIENT-LEVEL (MAJORITY) ===\n")
+            pl = test_results['patient_level']['majority']
+            f.write(f"  Accuracy:    {pl['acc']:.2f}%\n")
+            f.write(f"  AUC:         {pl['auc']:.4f}\n")
+            f.write(f"  Sensitivity: {pl['sens']:.4f}\n")
+            f.write(f"  Specificity: {pl['spec']:.4f}\n")
     print(f'Results saved to {log_file}')
 
     # ===== Lưu JSON =====
@@ -664,9 +660,6 @@ def train_with_margin(margin, args, train_loader, val_loader, test_loader, in_ch
         print(f'JSON results saved to {json_file}')
 
 
-# -------------------------------
-# HÀM CHÍNH
-# -------------------------------
 def main():
     margin_list = args.triplet_margin
     print(f"Will run with margins: {margin_list}")
