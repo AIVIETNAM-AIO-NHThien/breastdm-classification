@@ -214,7 +214,7 @@ class FCUUp(nn.Module):
 # ======================== Main Fusion Model (LG‑CAFN) ========================
 class FusionM(nn.Module):
     def __init__(self, num_classes=2, in_c=9, load_vit=False, embedding_dim=128,
-                 dropout_fusion=0.4, dropout_emb=0.1):
+                 dropout_fusion=0.1, dropout_emb=0.3):
         super(FusionM, self).__init__()
         self.in_c = in_c
         self.load_vit_flag = load_vit
@@ -231,8 +231,6 @@ class FusionM(nn.Module):
         for param in self.vit.parameters():
             param.requires_grad = True
 
-        # ==================== CNN branch (pretrainedmodels) ====================
-        # Tắt SSL check (phòng trường hợp vẫn cần tải)
         ssl._create_default_https_context = ssl._create_unverified_context
         se_resnet = pretrainedmodels.se_resnet50(pretrained='imagenet')
 
