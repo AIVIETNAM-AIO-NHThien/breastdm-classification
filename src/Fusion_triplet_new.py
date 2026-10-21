@@ -2,12 +2,10 @@ import os
 import ssl
 from functools import partial
 
-import timm
 import torch
 from torch import nn
 import torch.nn.functional as F
 import pretrainedmodels
-# File này được giả sử chứa các lớp PatchEmbed, Block, OrderedDict (nếu dùng trong VisionTransformer_base)
 from VIT_model import *
 
 
@@ -273,7 +271,7 @@ class FusionM(nn.Module):
         self.fcuup = FCUUp(inplanes=768, outplanes=512, up_stride=2)
 
         # ----- Dropout sau Fusion (trước classifier và embedding head) -----
-        self.fusion_dropout = nn.Dropout(p=dropout_fusion)   # ⭐ THÊM
+        self.fusion_dropout = nn.Dropout(p=dropout_fusion)  
 
         # ----- Classifier -----
         self.avgpool = nn.AdaptiveAvgPool2d(1)
@@ -284,7 +282,7 @@ class FusionM(nn.Module):
             nn.Linear(1024, 512),
             nn.BatchNorm1d(512),
             nn.ReLU(inplace=True),
-            nn.Dropout(p=dropout_emb),                       # ⭐ THÊM
+            nn.Dropout(p=dropout_emb),                       
             nn.Linear(512, embedding_dim)
         )
 
@@ -339,7 +337,6 @@ class FusionM(nn.Module):
 
         # Load với strict=False
         missing, unexpected = self.vit.load_state_dict(state_dict, strict=False)
-        print(f"✅ Loaded pretrained ViT (first 7 blocks) with weight inflation (kept 3 RGB channels)")
         if missing:
             print(f"   Missing keys (will be randomly init): {missing}")
 
