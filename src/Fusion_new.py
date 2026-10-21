@@ -229,7 +229,6 @@ class FusionM(nn.Module):
         # ==================== ViT branch ====================
         self.vit = VisionTransformer_base(img_size=img_size, patch_size=patch_size, in_c=in_c)
 
-        # ===== ĐÓNG BĂNG TOÀN BỘ ViT =====
         for param in self.vit.parameters():
             param.requires_grad = True
 
@@ -266,24 +265,21 @@ class FusionM(nn.Module):
 
         # 2. Xử lý position embedding: nội suy về kích thước ảnh hiện tại
         if 'pos_embed' in weight_dict:
-            pos_embed_pretrained = weight_dict['pos_embed']  # (1, 197, 768) cho 224x224, patch=16
+            pos_embed_pretrained = weight_dict['pos_embed']  
             cls_token_pos = pos_embed_pretrained[:, :1, :]
-            pos_embed_patches = pos_embed_pretrained[:, 1:, :]  # (1, 196, 768)
+            pos_embed_patches = pos_embed_pretrained[:, 1:, :]  
             num_patches_pret = pos_embed_patches.shape[1]
-            grid_size_pret = int(math.sqrt(num_patches_pret))  # 14
-
-            # Reshape về (1, 768, 14, 14)
+            grid_size_pret = int(math.sqrt(num_patches_pret))  
             pos_embed_patches = pos_embed_patches.reshape(1, grid_size_pret, grid_size_pret, -1).permute(0, 3, 1, 2)
             # Grid hiện tại
-            grid_size_new = self.vit.patch_embed.grid_size[0]  # 6
+            grid_size_new = self.vit.patch_embed.grid_size[0]  
             # Nội suy
             pos_embed_patches_new = F.interpolate(
                 pos_embed_patches, size=(grid_size_new, grid_size_new),
                 mode='bicubic', align_corners=False
             )
-            # Về (1, num_patches_new, 768)
             pos_embed_patches_new = pos_embed_patches_new.permute(0, 2, 3, 1).reshape(1, -1, 768)
-            # Ghép CLS
+           
             new_pos_embed = torch.cat([cls_token_pos, pos_embed_patches_new], dim=1)
             weight_dict['pos_embed'] = new_pos_embed
 
@@ -303,8 +299,8 @@ class FusionM(nn.Module):
         se_x = self.layer2(x)                                       # (B, 512, 12, 12)
 
         # Cross-attention fusion
-        x_path1 = self.Nlblock(se_x, vit_x)   # CNN query, ViT key/value
-        x_path2 = self.Nlblock(vit_x, se_x)   # ViT query, CNN key/value
+        x_path1 = self.Nlblock(se_x, vit_x)   
+        x_path2 = self.Nlblock(vit_x, se_x)   
         out = torch.cat((x_path1, x_path2), 1)  # (B, 1024, 12, 12)
 
         out = self.avgpool(out)
