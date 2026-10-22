@@ -1,453 +1,400 @@
-import argparse
 import os
-import random
-import numpy as np
+import ssl
+from functools import partial
+
+import timm
 import torch
-import torch.nn as nn
+from torch import nn
 import torch.nn.functional as F
-import torch.optim as optim
-from sklearn.metrics import accuracy_score, roc_auc_score, roc_curve, confusion_matrix, classification_report
-from sklearn.neighbors import KNeighborsClassifier
-from sklearn.svm import SVC
-
-# Import data loader và model
-from data_loader_triplet import create_dataloaders
-from Fusion_triplet_new import FusionM
-
-# -------------------------------
-# Hàm tính Sensitivity và Specificity dùng Youden index (giống Train.py)
-# -------------------------------
-def calc_sens_spec_youden(all_labels, all_probs):
-    """Tính Sensitivity, Specificity tại ngưỡng tối ưu theo Youden index."""
-    fpr, tpr, thresholds = roc_curve(all_labels, all_probs)
-    J = tpr - fpr
-    idx = np.argmax(J)
-    opt_thresh = thresholds[idx]
-    sens = tpr[idx]
-    spec = 1 - fpr[idx]
-    preds_opt = (all_probs >= opt_thresh).astype(int)
-    cm_opt = confusion_matrix(all_labels, preds_opt)
-    return sens, spec, opt_thresh, cm_opt
+import pretrainedmodels
+# File này được giả sử chứa các lớp PatchEmbed, Block, OrderedDict (nếu dùng trong VisionTransformer_base)
+from VIT_model import *
 
 
-# -------------------------------
-# Cấu hình dòng lệnh
-# -------------------------------
-parser = argparse.ArgumentParser(description='LG-CAFN training on BreastDM (CE + Triplet or Only Triplet)')
-parser.add_argument('--batch-size', type=int, default=16, help='batch size')
-parser.add_argument('--model', type=str, default='fusion', choices=['fusion'], help='model type')
-parser.add_argument('--gpu', type=str, default='0', help='GPU id(s)')
-parser.add_argument('--num_class', type=int, default=2, help='number of classes')
-parser.add_argument('--experiment', type=str, default='Exp-1', choices=['Exp-1', 'Exp-2'],
-                    help='Experiment type')
-parser.add_argument('--data-root', type=str, required=True, help='root directory containing train/val/test folders')
-parser.add_argument('--epochs', type=int, default=100, help='number of training epochs')
-parser.add_argument('--lr', type=float, default=0.01, help='initial learning rate')
-parser.add_argument('--momentum', type=float, default=0.9, help='SGD momentum')
-parser.add_argument('--weight-decay', type=float, default=0.05, help='L2 regularization')
-parser.add_argument('--load-vit', action='store_true', default=True, help='load pretrained ViT weights')
-parser.add_argument('--vit-path', type=str, default='./model/vit_base_patch16_224_in21k.pth',
-                    help='path to ViT pretrained weights')
-parser.add_argument('--save-dir', type=str, default='checkpoints', help='directory to save model checkpoints')
-parser.add_argument('--num-workers', type=int, default=4, help='number of data loading workers')
+# ======================== NLBlock (Cross‑Attention) ========================
+class NLBlockND(nn.Module):
+    """
+    Non‑Local Block with cross‑attention between two branches.
+    """
+    def __init__(self, in_channels, inter_channels=None, mode='embedded',
+                 dimension=2, bn_layer=True):
+        super(NLBlockND, self).__init__()
+        assert dimension in [1, 2, 3]
+        if mode not in ['gaussian', 'embedded', 'dot', 'concatenate']:
+            raise ValueError('`mode` must be one of `gaussian`, `embedded`, `dot` or `concatenate`')
 
-# Tham số cho triplet loss - cho phép nhiều giá trị margin
-parser.add_argument('--triplet-margin', type=float, nargs='+', default=[1.0],
-                    help='margin for triplet loss, can provide multiple values')
-parser.add_argument('--use-triplet', action='store_true', default=False,
-                    help='Enable triplet loss (combined with CE if --only-triplet not set)')
-parser.add_argument('--only-triplet', action='store_true', default=False,
-                    help='Use ONLY triplet loss (no cross-entropy)')
-parser.add_argument('--triplet-weight', type=float, default=1.0,
-                    help='Weight of triplet loss (when combined with CE)')
-parser.add_argument('--embedding-dim', type=int, default=128,
-                    help='Dimension of embedding for triplet loss')
-parser.add_argument('--eval-embedding', action='store_true', default=False,
-                    help='Evaluate val accuracy/AUC using SVM on embeddings when only triplet (expensive)')
-parser.add_argument('--svm-C', type=float, default=0.1, help='SVM regularization parameter')
+        self.mode = mode
+        self.dimension = dimension
+        self.in_channels = in_channels
+        self.inter_channels = inter_channels
 
-parser.add_argument('--seed', type=int, default=8, help='random seed')
-args = parser.parse_args()
+        if self.inter_channels is None:
+            self.inter_channels = in_channels // 2
+            if self.inter_channels == 0:
+                self.inter_channels = 1
 
-
-def set_seed(seed):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-
-set_seed(args.seed)
-# -------------------------------
-# Thiết bị GPU
-# -------------------------------
-os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-print(f'Using device: {device}')
-
-# -------------------------------
-# Xác định số kênh
-# -------------------------------
-if args.experiment == 'Exp-1':
-    in_channels = 9
-elif args.experiment == 'Exp-2':
-    in_channels = 17
-else:
-    raise ValueError('Unknown experiment')
-
-# -------------------------------
-# Tạo DataLoader (dùng chung cho tất cả margin)
-# -------------------------------
-train_loader, val_loader, test_loader = create_dataloaders(
-    root_dir=args.data_root,
-    experiment=args.experiment,
-    batch_size=args.batch_size,
-    num_workers=args.num_workers,
-    use_triplet=(args.use_triplet or args.only_triplet)
-)
-
-print(f"Train samples: {len(train_loader.dataset)}")
-print(f"Val samples:   {len(val_loader.dataset)}")
-print(f"Test samples:  {len(test_loader.dataset)}")
-
-# -------------------------------
-# Semi-hard triplet loss (không có default margin)
-# -------------------------------
-def batch_semihard_triplet_loss(embeddings, labels, margin):
-    pairwise_dist = torch.cdist(embeddings, embeddings, p=2)
-    loss = torch.tensor(0.0, device=embeddings.device, dtype=embeddings.dtype)
-    num_triplets = 0
-    device = embeddings.device
-
-    for i in range(len(labels)):
-        anchor_label = labels[i]
-        pos_mask = (labels == anchor_label) & (torch.arange(len(labels), device=device) != i)
-        neg_mask = (labels != anchor_label)
-
-        if pos_mask.sum() == 0 or neg_mask.sum() == 0:
-            continue
-
-        hardest_pos_dist = pairwise_dist[i][pos_mask].max()
-        neg_dists = pairwise_dist[i][neg_mask]
-        semi_hard_mask = (neg_dists > hardest_pos_dist) & (neg_dists < hardest_pos_dist + margin)
-
-        if semi_hard_mask.sum() == 0:
-            continue
-
-        hardest_semihard_dist = neg_dists[semi_hard_mask].min()
-        loss += F.relu(hardest_pos_dist - hardest_semihard_dist + margin)
-        num_triplets += 1
-
-    if num_triplets > 0:
-        loss = loss / num_triplets
-    else:
-        loss = torch.tensor(0.0, device=embeddings.device, requires_grad=True)
-    return loss
-
-# -------------------------------
-# Hàm đánh giá (dùng Youden index) – dành cho CE và CE+Triplet
-# -------------------------------
-def evaluate(model, loader, criterion_ce, device, target_name='Val'):
-    model.eval()
-    total_loss = 0.0
-    correct = 0
-    total = 0
-    all_preds = []
-    all_labels = []
-    all_probs = []
-
-    with torch.no_grad():
-        for data, target in loader:
-            data, target = data.to(device), target.to(device)
-            output = model(data)
-            loss = criterion_ce(output, target)
-
-            total_loss += loss.item() * data.size(0)
-            _, pred = output.max(1)
-            correct += pred.eq(target).sum().item()
-            total += target.size(0)
-
-            prob = torch.softmax(output, dim=1)[:, 1]
-            all_probs.append(prob.cpu().numpy())
-            all_preds.append(pred.cpu().numpy())
-            all_labels.append(target.cpu().numpy())
-
-    avg_loss = total_loss / total
-    acc = 100. * correct / total
-
-    all_labels = np.concatenate(all_labels)
-    all_preds = np.concatenate(all_preds)
-    all_probs = np.concatenate(all_probs)
-
-    auc = roc_auc_score(all_labels, all_probs)
-    sens_youden, spec_youden, opt_thresh, cm_youden = calc_sens_spec_youden(all_labels, all_probs)
-
-    if target_name == 'Test':
-        print(classification_report(all_labels, all_preds, target_names=['Benign', 'Malignant'], digits=4))
-
-    print(f'{target_name} set: Loss: {avg_loss:.4f}, Acc: {acc:.2f}%, AUC: {auc:.4f}, '
-          f'Sensitivity: {sens_youden:.4f}, Specificity: {spec_youden:.4f}')
-    print(f'Optimal threshold (Youden): {opt_thresh:.4f}')
-    print('Confusion Matrix (at Youden threshold):')
-    print(cm_youden)
-
-    return avg_loss, acc, auc, sens_youden, spec_youden
-
-# -------------------------------
-# Hàm đánh giá bằng SVM trên embedding (dùng cho only_triplet)
-# -------------------------------
-def evaluate_embedding_svm(model, train_loader, val_loader, device, kernel='rbf', C=args.svm_C):
-    model.eval()
-    train_embs, train_labels = [], []
-    val_embs, val_labels = [], []
-
-    with torch.no_grad():
-        for data, target in train_loader:
-            emb = model(data.to(device), return_embedding=True).cpu().numpy()
-            train_embs.append(emb)
-            train_labels.append(target.numpy())
-        for data, target in val_loader:
-            emb = model(data.to(device), return_embedding=True).cpu().numpy()
-            val_embs.append(emb)
-            val_labels.append(target.numpy())
-
-    X_train = np.concatenate(train_embs)
-    y_train = np.concatenate(train_labels)
-    X_val = np.concatenate(val_embs)
-    y_val = np.concatenate(val_labels)
-
-    clf = SVC(kernel=kernel, C=C, probability=True, random_state=42)
-    clf.fit(X_train, y_train)
-    y_pred = clf.predict(X_val)
-    y_proba = clf.predict_proba(X_val)[:, 1]
-
-    acc = accuracy_score(y_val, y_pred)
-    auc = roc_auc_score(y_val, y_proba)
-    cm = confusion_matrix(y_val, y_pred)
-    TN, FP = cm[0,0], cm[0,1]
-    FN, TP = cm[1,0], cm[1,1]
-    sens = TP / (TP + FN) if (TP + FN) > 0 else 0.0
-    spec = TN / (TN + FP) if (TN + FP) > 0 else 0.0
-
-    print(f'SVM (kernel={kernel}, C={C}) on Val: Acc: {acc*100:.2f}%, AUC: {auc:.4f}, Sens: {sens:.4f}, Spec: {spec:.4f}')
-    return acc * 100, auc, sens, spec
-
-# -------------------------------
-# Hàm huấn luyện một epoch (nhận tham số margin)
-# -------------------------------
-def train_one_epoch(epoch, model, loader, optimizer, criterion_ce, criterion_triplet, device, args, margin):
-    model.train()
-    total_loss = 0.0
-    total_ce = 0.0
-    total_triplet = 0.0
-    correct = 0
-    total = 0
-
-    for batch_idx, (data, target) in enumerate(loader):
-        data, target = data.to(device), target.to(device)
-        optimizer.zero_grad()
-
-        if args.only_triplet:
-            embeddings = model(data, return_embedding=True)
-            loss = batch_semihard_triplet_loss(embeddings, target, margin)
-            total_triplet += loss.item() * data.size(0)
+        if dimension == 3:
+            conv_nd = nn.Conv3d
+            max_pool_layer = nn.MaxPool3d(kernel_size=(1, 2, 2))
+            bn = nn.BatchNorm3d
+        elif dimension == 2:
+            conv_nd = nn.Conv2d
+            max_pool_layer = nn.MaxPool2d(kernel_size=(2, 2))
+            bn = nn.BatchNorm2d
         else:
-            logits = model(data)
-            loss_ce = criterion_ce(logits, target)
-            _, pred = logits.max(1)
-            correct += pred.eq(target).sum().item()
-            total += target.size(0)
-            loss = loss_ce
-            total_ce += loss_ce.item() * data.size(0)
+            conv_nd = nn.Conv1d
+            max_pool_layer = nn.MaxPool1d(kernel_size=(2))
+            bn = nn.BatchNorm1d
 
-            if args.use_triplet:
-                embeddings = model(data, return_embedding=True)
-                loss_triplet = batch_semihard_triplet_loss(embeddings, target, margin)
-                loss = loss_ce + args.triplet_weight * loss_triplet
-                total_triplet += loss_triplet.item() * data.size(0)
+        self.g = conv_nd(in_channels=self.in_channels, out_channels=self.inter_channels, kernel_size=1)
 
-        loss.backward()
-        optimizer.step()
-        total_loss += loss.item() * data.size(0)
-
-        if batch_idx % 10 == 0:
-            print(f'Train Epoch: {epoch} [{batch_idx * len(data)}/{len(loader.dataset)} '
-                  f'({100. * batch_idx / len(loader):.0f}%)]\tLoss: {loss.item():.6f}')
-
-    avg_loss = total_loss / len(loader.dataset)
-    avg_ce = total_ce / len(loader.dataset) if not args.only_triplet else 0.0
-    avg_triplet = total_triplet / len(loader.dataset)
-
-    if args.only_triplet:
-        print(f'Train Epoch: {epoch} - Avg loss: {avg_loss:.4f}, Triplet: {avg_triplet:.4f}')
-        return avg_loss, None
-    else:
-        acc = 100. * correct / total
-        print(f'Train Epoch: {epoch} - Avg loss: {avg_loss:.4f}, CE: {avg_ce:.4f}, Triplet: {avg_triplet:.4f}, Accuracy: {acc:.2f}%')
-        return avg_loss, acc
-
-# -------------------------------
-# Hàm đánh giá cuối cùng bằng SVM cho test (chỉ dùng only_triplet)
-# -------------------------------
-def evaluate_final_svm(model, train_loader, test_loader, device, kernel='rbf', C=args.svm_C):
-    model.eval()
-    train_embs, train_labels = [], []
-    test_embs, test_labels = [], []
-    with torch.no_grad():
-        for data, target in train_loader:
-            emb = model(data.to(device), return_embedding=True).cpu().numpy()
-            train_embs.append(emb)
-            train_labels.append(target.numpy())
-        for data, target in test_loader:
-            emb = model(data.to(device), return_embedding=True).cpu().numpy()
-            test_embs.append(emb)
-            test_labels.append(target.numpy())
-    X_train = np.concatenate(train_embs)
-    y_train = np.concatenate(train_labels)
-    X_test = np.concatenate(test_embs)
-    y_test = np.concatenate(test_labels)
-    clf = SVC(kernel=kernel, C=C, probability=True, random_state=42)
-    clf.fit(X_train, y_train)
-    y_pred = clf.predict(X_test)
-    y_proba = clf.predict_proba(X_test)[:, 1]
-    acc = accuracy_score(y_test, y_pred) * 100
-    auc = roc_auc_score(y_test, y_proba)
-    cm = confusion_matrix(y_test, y_pred)
-    TN, FP = cm[0,0], cm[0,1]
-    FN, TP = cm[1,0], cm[1,1]
-    sens = TP / (TP + FN) if (TP + FN) > 0 else 0.0
-    spec = TN / (TN + FP) if (TN + FP) > 0 else 0.0
-    print(f'Test set (SVM): Accuracy: {acc:.2f}%, AUC: {auc:.4f}, Sens: {sens:.4f}, Spec: {spec:.4f}')
-    print(classification_report(y_test, y_pred, target_names=['Benign', 'Malignant'], digits=4))
-    print('Confusion Matrix:')
-    print(cm)
-    return acc, auc
-
-# -------------------------------
-# Hàm huấn luyện cho một margin cụ thể
-# -------------------------------
-def train_with_margin(margin, args, train_loader, val_loader, test_loader, in_channels, device):
-    print(f"\n{'='*60}")
-    print(f"   BẮT ĐẦU HUẤN LUYỆN VỚI MARGIN = {margin}")
-    print('='*60)
-
-    # Tạo thư mục lưu riêng cho margin này
-    save_dir = os.path.join(args.save_dir, f"margin_{margin}")
-    os.makedirs(save_dir, exist_ok=True)
-
-    # Khởi tạo model mới
-    model = FusionM(num_classes=args.num_class,
-                    in_c=in_channels,
-                    load_vit=args.load_vit,
-                    embedding_dim=args.embedding_dim)
-    if args.load_vit:
-        model.path = args.vit_path
-    model = model.to(device)
-    if len(args.gpu.split(',')) > 1:
-        model = torch.nn.DataParallel(model, device_ids=list(range(len(args.gpu.split(',')))))
-
-    # Loss và Optimizer
-    criterion_ce = nn.CrossEntropyLoss()
-    optimizer = optim.SGD(model.parameters(),
-                          lr=args.lr,
-                          momentum=args.momentum,
-                          weight_decay=args.weight_decay)
-
-    best_val_auc = 0.0
-    best_epoch = -1
-
-    for epoch in range(1, args.epochs + 1):
-        print(f'\n===== Epoch {epoch}/{args.epochs} =====')
-
-        # Cập nhật learning rate
-        current_lr = max(args.lr * (0.5 ** (epoch // 20)), 1e-5)
-        for param_group in optimizer.param_groups:
-            param_group['lr'] = current_lr
-        print(f'Learning rate: {current_lr:.6f}')
-
-        train_loss, train_acc = train_one_epoch(epoch, model, train_loader, optimizer,
-                                                criterion_ce, None, device, args, margin)
-
-        if args.only_triplet:
-            if args.eval_embedding:
-                val_acc, val_auc, val_sens, val_spec = evaluate_embedding_svm(
-                    model, train_loader, val_loader, device, kernel='rbf', C=args.svm_C
-                )
-                print(f'Val set (SVM): Accuracy: {val_acc:.2f}%, AUC: {val_auc:.4f}, Sens: {val_sens:.4f}, Spec: {val_spec:.4f}')
-                if val_auc > best_val_auc:
-                    best_val_auc = val_auc
-                    best_epoch = epoch
-                    save_path = os.path.join(save_dir, f'best_model_triplet_only_{args.experiment}.pth')
-                    state_dict = model.module.state_dict() if isinstance(model, torch.nn.DataParallel) else model.state_dict()
-                    torch.save(state_dict, save_path)
-                    print(f'Checkpoint saved to {save_path} (val AUC: {val_auc:.4f})')
-            else:
-                # Nếu không đánh giá, lưu theo train loss (cần khai báo best_val_loss)
-                if 'best_val_loss' not in locals():
-                    best_val_loss = float('inf')
-                if train_loss < best_val_loss:
-                    best_val_loss = train_loss
-                    save_path = os.path.join(save_dir, f'best_model_triplet_only_{args.experiment}.pth')
-                    state_dict = model.module.state_dict() if isinstance(model, torch.nn.DataParallel) else model.state_dict()
-                    torch.save(state_dict, save_path)
-                    print(f'Checkpoint saved (train loss: {train_loss:.4f})')
+        if bn_layer:
+            self.W_z = nn.Sequential(
+                conv_nd(in_channels=self.inter_channels, out_channels=self.in_channels, kernel_size=1),
+                bn(self.in_channels)
+            )
+            nn.init.constant_(self.W_z[1].weight, 0)
+            nn.init.constant_(self.W_z[1].bias, 0)
         else:
-            val_loss, val_acc, val_auc, val_sens, val_spec = evaluate(model, val_loader, criterion_ce, device, 'Val')
-            if val_auc > best_val_auc:
-                best_val_auc = val_auc
-                best_epoch = epoch
-                save_path = os.path.join(save_dir, f'best_model_ce_{args.experiment}.pth')
-                state_dict = model.module.state_dict() if isinstance(model, torch.nn.DataParallel) else model.state_dict()
-                torch.save(state_dict, save_path)
-                print(f'Checkpoint saved to {save_path} (val AUC: {val_auc:.4f})')
+            self.W_z = conv_nd(in_channels=self.inter_channels, out_channels=self.in_channels, kernel_size=1)
+            nn.init.constant_(self.W_z.weight, 0)
+            nn.init.constant_(self.W_z.bias, 0)
 
-    print(f'\nTraining finished for margin={margin}. Best validation AUC: {best_val_auc:.4f} at epoch {best_epoch}')
+        if self.mode == "embedded" or self.mode == "dot" or self.mode == "concatenate":
+            self.theta = conv_nd(in_channels=self.in_channels, out_channels=self.inter_channels, kernel_size=1)
+            self.phi = conv_nd(in_channels=self.in_channels, out_channels=self.inter_channels, kernel_size=1)
 
-    # ----- Đánh giá test cho margin này -----
-    print('\nLoading best model for test evaluation...')
-    if args.only_triplet:
-        best_model_path = os.path.join(save_dir, f'best_model_triplet_only_{args.experiment}.pth')
-        model_test = FusionM(num_classes=args.num_class, in_c=in_channels,
-                             load_vit=False, embedding_dim=args.embedding_dim)
-        model_test.load_state_dict(torch.load(best_model_path, map_location=device))
-        model_test = model_test.to(device)
-        if len(args.gpu.split(',')) > 1:
-            model_test = torch.nn.DataParallel(model_test)
-        evaluate_final_svm(model_test, train_loader, test_loader, device, kernel='rbf', C=args.svm_C)
-    else:
-        best_model_path = os.path.join(save_dir, f'best_model_ce_{args.experiment}.pth')
-        if os.path.exists(best_model_path):
-            model_test = FusionM(num_classes=args.num_class, in_c=in_channels,
-                                 load_vit=False, embedding_dim=args.embedding_dim)
-            model_test.load_state_dict(torch.load(best_model_path, map_location=device))
-            model_test = model_test.to(device)
-            if len(args.gpu.split(',')) > 1:
-                model_test = torch.nn.DataParallel(model_test)
-            evaluate(model_test, test_loader, criterion_ce, device, 'Test')
+        if self.mode == "concatenate":
+            self.W_f = nn.Sequential(
+                nn.Conv2d(in_channels=self.inter_channels * 2, out_channels=1, kernel_size=1),
+                nn.ReLU()
+            )
+
+    def forward(self, x_thisBranch, x_otherBranch):
+        batch_size = x_thisBranch.size(0)
+        g_x = self.g(x_thisBranch).view(batch_size, self.inter_channels, -1)
+        g_x = g_x.permute(0, 2, 1)
+
+        if self.mode == "gaussian":
+            # Paper: θ từ C_in (x_otherBranch), Φ từ P (x_thisBranch)
+            theta_x = x_otherBranch.view(batch_size, self.in_channels, -1)
+            phi_x = x_thisBranch.view(batch_size, self.in_channels, -1)
+            theta_x = theta_x.permute(0, 2, 1)          # (B, HW, C)
+            f = torch.matmul(theta_x, phi_x)             # (B, HW, HW)
+        elif self.mode == "embedded" or self.mode == "dot":
+            # Paper: θ từ C_in (x_otherBranch), Φ từ P (x_thisBranch)
+            theta_x = self.theta(x_otherBranch).view(batch_size, self.inter_channels, -1)
+            phi_x = self.phi(x_thisBranch).view(batch_size, self.inter_channels, -1)
+            theta_x = theta_x.permute(0, 2, 1)          # (B, HW, C)
+            f = torch.matmul(theta_x, phi_x)             # (B, HW, HW)
+        else:  # concatenate
+            # Paper: θ từ C_in (x_otherBranch), Φ từ P (x_thisBranch)
+            theta_x = self.theta(x_otherBranch).view(batch_size, self.inter_channels, -1, 1)
+            phi_x = self.phi(x_thisBranch).view(batch_size, self.inter_channels, 1, -1)
+            h = theta_x.size(2)
+            w = phi_x.size(3)
+            theta_x = theta_x.repeat(1, 1, 1, w)
+            phi_x = phi_x.repeat(1, 1, h, 1)
+            concat = torch.cat([theta_x, phi_x], dim=1)
+            f = self.W_f(concat)
+            f = f.view(f.size(0), f.size(2), f.size(3))
+
+        if self.mode == "gaussian" or self.mode == "embedded":
+            f_div_C = F.softmax(f, dim=-1)
+        elif self.mode == "dot" or self.mode == "concatenate":
+            N = f.size(-1)
+            f_div_C = f / N
+
+        y = torch.matmul(f_div_C, g_x)
+        y = y.permute(0, 2, 1).contiguous()
+        y = y.view(batch_size, self.inter_channels, *x_thisBranch.size()[2:])
+        W_y = self.W_z(y)
+        z = W_y + x_thisBranch
+        return z
+
+
+# ======================== ViT Base (VisionTransformer_base) ========================
+class VisionTransformer_base(nn.Module):
+    def __init__(self, img_size=96, patch_size=16, in_c=9, num_classes=2,
+                 embed_dim=768, depth=7, num_heads=12, mlp_ratio=4.0, qkv_bias=True,
+                 qk_scale=None, representation_size=None, distilled=False, drop_ratio=0.,
+                 attn_drop_ratio=0., drop_path_ratio=0., embed_layer=PatchEmbed, norm_layer=None,
+                 act_layer=None):
+        super(VisionTransformer_base, self).__init__()
+        self.num_classes = num_classes
+        self.num_features = self.embed_dim = embed_dim
+        self.num_tokens = 2 if distilled else 1
+        norm_layer = norm_layer or partial(nn.LayerNorm, eps=1e-6)
+        act_layer = act_layer or nn.GELU
+
+        self.patch_embed = embed_layer(img_size=img_size, patch_size=patch_size, in_c=in_c, embed_dim=embed_dim)
+        num_patches = self.patch_embed.num_patches
+
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        self.dist_token = nn.Parameter(torch.zeros(1, 1, embed_dim)) if distilled else None
+        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + self.num_tokens, embed_dim))
+        self.pos_drop = nn.Dropout(p=drop_ratio)
+
+        dpr = [x.item() for x in torch.linspace(0, drop_path_ratio, depth)]
+        self.blocks = nn.Sequential(*[
+            Block(dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, qk_scale=qk_scale,
+                  drop_ratio=drop_ratio, attn_drop_ratio=attn_drop_ratio, drop_path_ratio=dpr[i],
+                  norm_layer=norm_layer, act_layer=act_layer)
+            for i in range(depth)
+        ])
+        self.norm = norm_layer(embed_dim)
+
+        if representation_size and not distilled:
+            self.has_logits = True
+            self.num_features = representation_size
+            self.pre_logits = nn.Sequential(OrderedDict([
+                ("fc", nn.Linear(embed_dim, representation_size)),
+                ("act", nn.Tanh())
+            ]))
         else:
-            print('Best model not found, evaluating current model.')
-            evaluate(model, test_loader, criterion_ce, device, 'Test')
+            self.has_logits = False
+            self.pre_logits = nn.Identity()
 
-    # Lưu kết quả vào file log
-    log_file = os.path.join(save_dir, 'results.txt')
-    with open(log_file, 'w') as f:
-        f.write(f"Margin: {margin}\n")
-        f.write(f"Best validation AUC: {best_val_auc:.4f} at epoch {best_epoch}\n")
-        # Bạn có thể thêm các chỉ số khác nếu muốn
-    print(f'Results saved to {log_file}')
+        self.head = nn.Linear(self.num_features, num_classes) if num_classes > 0 else nn.Identity()
+        self.head_dist = None
+        if distilled:
+            self.head_dist = nn.Linear(self.embed_dim, self.num_classes) if num_classes > 0 else nn.Identity()
 
-# -------------------------------
-# HÀM CHÍNH
-# -------------------------------
-def main():
-    # Danh sách margin lấy từ args
-    margin_list = args.triplet_margin
-    print(f"Will run with margins: {margin_list}")
+        # Init weights
+        nn.init.trunc_normal_(self.pos_embed, std=0.02)
+        if self.dist_token is not None:
+            nn.init.trunc_normal_(self.dist_token, std=0.02)
+        nn.init.trunc_normal_(self.cls_token, std=0.02)
+        self.apply(_init_vit_weights)
 
-    for margin in margin_list:
-        train_with_margin(margin, args, train_loader, val_loader, test_loader, in_channels, device)
+    def forward(self, x):
+        x = self.patch_embed(x)
+        cls_token = self.cls_token.expand(x.shape[0], -1, -1)
+        if self.dist_token is None:
+            x = torch.cat((cls_token, x), dim=1)
+        else:
+            x = torch.cat((cls_token, self.dist_token.expand(x.shape[0], -1, -1), x), dim=1)
+        x = self.pos_drop(x + self.pos_embed)
+        x = self.blocks(x)
+        x = self.norm(x)
+        return x
 
-if __name__ == "__main__":
-    main()
+
+def _init_vit_weights(m):
+    if isinstance(m, nn.Linear):
+        nn.init.trunc_normal_(m.weight, std=.01)
+        if m.bias is not None:
+            nn.init.zeros_(m.bias)
+    elif isinstance(m, nn.Conv2d):
+        nn.init.kaiming_normal_(m.weight, mode="fan_out")
+        if m.bias is not None:
+            nn.init.zeros_(m.bias)
+    elif isinstance(m, nn.LayerNorm):
+        nn.init.zeros_(m.bias)
+        nn.init.ones_(m.weight)
+
+
+# ======================== FCU (Feature Coupling Unit) ========================
+class FCUUp(nn.Module):
+    def __init__(self, inplanes=768, outplanes=512, up_stride=2, act_layer=nn.ReLU,
+                 norm_layer=partial(nn.BatchNorm2d, eps=1e-6)):
+        super(FCUUp, self).__init__()
+        self.up_stride = up_stride
+        self.conv_project = nn.Conv2d(inplanes, outplanes, kernel_size=1, stride=1, padding=0)
+        self.bn = norm_layer(outplanes)
+        self.act = act_layer()
+
+    def forward(self, x, H, W):
+        B, _, C = x.shape
+        x_r = x[:, 1:].transpose(1, 2).reshape(B, C, H, W)
+        x_r = self.act(self.bn(self.conv_project(x_r)))
+        return F.interpolate(x_r, size=(H * self.up_stride, W * self.up_stride))
+
+
+# ======================== Main Fusion Model (LG‑CAFN) ========================
+class FusionM(nn.Module):
+    def __init__(self, num_classes=2, in_c=9, load_vit=False, embedding_dim=128,
+                 dropout_fusion=0.4, dropout_emb=0.1):
+        super(FusionM, self).__init__()
+        self.in_c = in_c
+        self.load_vit_flag = load_vit
+        self.path = r'./model/vit_base_patch16_224_in21k.pth'
+
+        # ----- ViT branch (giữ nguyên) -----
+        self.vit = VisionTransformer_base(
+            img_size=96, patch_size=16, in_c=in_c,
+            num_classes=num_classes, depth=7
+        )
+        if self.load_vit_flag:
+            self._load_pretrained_vit()
+
+        # ==================== CNN branch (pretrainedmodels) ====================
+        # Tắt SSL check (phòng trường hợp vẫn cần tải)
+        ssl._create_default_https_context = ssl._create_unverified_context
+        se_resnet = pretrainedmodels.se_resnet50(pretrained='imagenet')
+
+        # --- Lấy conv1 từ layer0[0] (cấu trúc của pretrainedmodels) ---
+        old_conv = se_resnet.layer0[0]  # <--- Sửa cách truy cập conv1
+
+        # Tạo conv1 mới với in_c kênh
+        new_conv = nn.Conv2d(
+            in_c,
+            old_conv.out_channels,
+            kernel_size=old_conv.kernel_size,
+            stride=old_conv.stride,
+            padding=old_conv.padding,
+            bias=False
+        )
+
+        with torch.no_grad():
+            # Giữ 3 kênh RGB đầu
+            new_conv.weight[:, :3] = old_conv.weight
+            # Trung bình 3 kênh RGB để khởi tạo các kênh còn lại
+            mean_w = old_conv.weight.mean(dim=1, keepdim=True)  # [64, 1, 7, 7]
+            for i in range(3, in_c):
+                new_conv.weight[:, i] = mean_w[:, 0]
+
+        # Gán conv1 mới vào se_resnet
+        se_resnet.layer0[0] = new_conv
+
+        # ----- Tách các stage (layer0, layer1, layer2) -----
+        # Layer0: conv1 + bn1 + relu + maxpool
+        self.layer0 = nn.Sequential(
+            se_resnet.layer0[0],  # conv1 (đã sửa)
+            se_resnet.layer0[1],  # bn1
+            se_resnet.layer0[2],  # relu (pretrainedmodels dùng .relu)
+            se_resnet.layer0[3]   # maxpool
+        )
+        self.layer1 = se_resnet.layer1  # 256 kênh, size 24x24
+        self.layer2 = se_resnet.layer2  # 512 kênh, size 12x12
+
+        # ----- Fusion -----
+        self.Nlblock = NLBlockND(in_channels=512)
+        self.fcuup = FCUUp(inplanes=768, outplanes=512, up_stride=2)
+
+        # ----- Dropout sau Fusion (trước classifier và embedding head) -----
+        self.fusion_dropout = nn.Dropout(p=dropout_fusion)   # ⭐ THÊM
+
+        # ----- Classifier -----
+        self.avgpool = nn.AdaptiveAvgPool2d(1)
+        self.fc = nn.Linear(1024, num_classes)
+
+        # ----- Embedding head (cho triplet loss) - có Dropout bên trong -----
+        self.embedding_head = nn.Sequential(
+            nn.Linear(1024, 512),
+            nn.BatchNorm1d(512),
+            nn.ReLU(inplace=True),
+            nn.Dropout(p=dropout_emb),                       # ⭐ THÊM
+            nn.Linear(512, embedding_dim)
+        )
+
+        self._init_new_layers()
+
+    def _init_new_layers(self):
+        for m in [self.fcuup, self.Nlblock, self.fc]:
+            m.apply(_init_vit_weights)
+        self.embedding_head.apply(_init_vit_weights)
+
+    def _load_pretrained_vit(self):
+        """Load pretrained ViT, xử lý pos_embed và weight inflation cho patch_embed (giữ 3 kênh đầu)."""
+        if not os.path.exists(self.path):
+            print(f"⚠️  Pretrained ViT not found at {self.path}")
+            return
+
+        state_dict = torch.load(self.path, map_location='cpu')
+
+        # Xoá head không cần thiết
+        for k in ['head.weight', 'head.bias', 'head_dist.weight', 'head_dist.bias']:
+            state_dict.pop(k, None)
+
+        # --- Weight inflation cho patch_embed ---
+        if 'patch_embed.proj.weight' in state_dict:
+            old_weight = state_dict['patch_embed.proj.weight']          # [768, 3, 16, 16]
+            new_channels = self.vit.patch_embed.proj.weight.shape[1]    # 9 hoặc 17
+            if old_weight.shape[1] != new_channels:
+                print(f"🔄 Inflating patch_embed channels: {old_weight.shape[1]} → {new_channels}")
+                new_weight = torch.zeros_like(self.vit.patch_embed.proj.weight)
+                # Giữ 3 kênh đầu
+                new_weight[:, :3] = old_weight
+                # Trung bình cho các kênh còn lại
+                mean_w = old_weight.mean(dim=1, keepdim=True)           # [768, 1, 16, 16]
+                for i in range(3, new_channels):
+                    new_weight[:, i] = mean_w[:, 0]
+                state_dict['patch_embed.proj.weight'] = new_weight
+
+        # --- Nội suy pos_embed ---
+        if 'pos_embed' in state_dict:
+            pretrained_pos = state_dict['pos_embed']          # [1, 197, 768]
+            current_pos = self.vit.pos_embed                  # [1, 37, 768]
+            if pretrained_pos.shape != current_pos.shape:
+                print(f"🔄 Interpolating pos_embed: {pretrained_pos.shape} → {current_pos.shape}")
+                cls_token = pretrained_pos[:, :1, :]
+                patches = pretrained_pos[:, 1:, :]            # [1, 196, 768]
+                grid_size = int(patches.shape[1] ** 0.5)      # 14
+                new_grid = int((current_pos.shape[1] - 1) ** 0.5)  # 6
+                patches = patches.reshape(1, grid_size, grid_size, -1).permute(0, 3, 1, 2)
+                patches = F.interpolate(patches, size=(new_grid, new_grid), mode='bicubic', align_corners=False)
+                patches = patches.permute(0, 2, 3, 1).reshape(1, new_grid * new_grid, -1)
+                state_dict['pos_embed'] = torch.cat([cls_token, patches], dim=1)
+
+        # Load với strict=False
+        missing, unexpected = self.vit.load_state_dict(state_dict, strict=False)
+        print(f"✅ Loaded pretrained ViT (first 7 blocks) with weight inflation (kept 3 RGB channels)")
+        if missing:
+            print(f"   Missing keys (will be randomly init): {missing}")
+
+    def forward(self, x, return_embedding=False):
+        # ViT pathway
+        vit_x = self.vit(x)                       # (B, 37, 768)
+        num_patches = vit_x.size(1) - 1
+        H = W = int(num_patches ** 0.5)           # 6
+        vit_feat = self.fcuup(vit_x, H, W)        # (B, 512, 12, 12)
+
+        # CNN pathway: layer0 → layer1 → layer2
+        cnn_feat = self.layer0(x)                 # (B, 64, 48, 48)
+        cnn_feat = self.layer1(cnn_feat)          # (B, 256, 24, 24)
+        cnn_feat = self.layer2(cnn_feat)          # (B, 512, 12, 12)
+
+        # Cross‑attention
+        out1 = self.Nlblock(cnn_feat, vit_feat)   # CNN query ViT
+        out2 = self.Nlblock(vit_feat, cnn_feat)   # ViT query CNN
+        fused = torch.cat((out1, out2), dim=1)    # (B, 1024, 12, 12)
+
+        # Global pooling
+        pooled = self.avgpool(fused)              # (B, 1024, 1, 1)
+        pooled = pooled.view(pooled.size(0), -1)  # (B, 1024)
+
+        #Dropout sau fusion (áp dụng cho cả embedding và logits)
+        pooled = self.fusion_dropout(pooled)
+
+        if return_embedding:
+            emb = self.embedding_head(pooled)
+            emb = F.normalize(emb, p=2, dim=1)
+            return emb
+
+        logits = self.fc(pooled)
+        return logits
+
+
+# ======================== Test ========================
+if __name__ == '__main__':
+    print("Testing with 9 channels (Exp-1)...")
+    dummy = torch.rand(2, 9, 96, 96)
+    model = FusionM(num_classes=2, in_c=9, load_vit=False)
+    out = model(dummy)
+    print("Output (logits) shape:", out.shape)
+
+    emb = model(dummy, return_embedding=True)
+    print("Embedding shape:", emb.shape)
+    print("Embedding L2 norm:", emb.norm(dim=1))
+
+    print("\nTesting with 17 channels (Exp-2)...")
+    dummy17 = torch.rand(2, 17, 96, 96)
+    model17 = FusionM(num_classes=2, in_c=17, load_vit=False)
+    out17 = model17(dummy17)
+    print("Output (logits) shape:", out17.shape)
+
+    print("\nTesting with pretrained ViT weights...")
+    model_pretrained = FusionM(num_classes=2, in_c=17, load_vit=True)
+    out_pretrained = model_pretrained(dummy17)
+    print("Output (logits) shape:", out_pretrained.shape)
