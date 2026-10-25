@@ -7,11 +7,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from sklearn.metrics import accuracy_score, roc_auc_score, roc_curve, confusion_matrix, classification_report
-from sklearn.neighbors import KNeighborsClassifier
 from sklearn.svm import SVC
 
 # Import data loader và model
-from data_loader_triplet import create_dataloaders
+from data_loader_triplet_fix_new import create_dataloaders
 from Fusion_triplet_new import FusionM
 
 # -------------------------------
@@ -51,7 +50,6 @@ parser.add_argument('--vit-path', type=str, default='./model/vit_base_patch16_22
 parser.add_argument('--save-dir', type=str, default='checkpoints', help='directory to save model checkpoints')
 parser.add_argument('--num-workers', type=int, default=4, help='number of data loading workers')
 
-# Tham số cho triplet loss - cho phép nhiều giá trị margin
 parser.add_argument('--triplet-margin', type=float, nargs='+', default=[1.0],
                     help='margin for triplet loss, can provide multiple values')
 parser.add_argument('--use-triplet', action='store_true', default=False,
@@ -63,7 +61,7 @@ parser.add_argument('--triplet-weight', type=float, default=1.0,
 parser.add_argument('--embedding-dim', type=int, default=128,
                     help='Dimension of embedding for triplet loss')
 parser.add_argument('--eval-embedding', action='store_true', default=False,
-                    help='Evaluate val accuracy/AUC using SVM on embeddings when only triplet (expensive)')
+                    help='Evaluate val accuracy/AUC using SVM on embeddings when only triplet')
 parser.add_argument('--svm-C', type=float, default=0.1, help='SVM regularization parameter')
 
 parser.add_argument('--seed', type=int, default=8, help='random seed')
@@ -97,9 +95,7 @@ elif args.experiment == 'Exp-2':
 else:
     raise ValueError('Unknown experiment')
 
-# -------------------------------
-# Tạo DataLoader (dùng chung cho tất cả margin)
-# -------------------------------
+
 train_loader, val_loader, test_loader = create_dataloaders(
     root_dir=args.data_root,
     experiment=args.experiment,
@@ -116,27 +112,27 @@ print(f"Test samples:  {len(test_loader.dataset)}")
 # Semi-hard triplet loss (không có default margin)
 # -------------------------------
 def batch_semihard_triplet_loss(embeddings, labels, margin):
-    pairwise_dist = torch.cdist(embeddings, embeddings, p=2)
+    pairwise_dist = torch.cdist(embeddings, embeddings, p=2)  # tính euclidian distance cho mọi cặp 
     loss = torch.tensor(0.0, device=embeddings.device, dtype=embeddings.dtype)
     num_triplets = 0
     device = embeddings.device
 
-    for i in range(len(labels)):
-        anchor_label = labels[i]
-        pos_mask = (labels == anchor_label) & (torch.arange(len(labels), device=device) != i)
-        neg_mask = (labels != anchor_label)
+    for i in range(len(labels)):  # duyệt qua từng anchor trong batch
+        anchor_label = labels[i] # lấy label của từng anchor thứ i
+        pos_mask = (labels == anchor_label) & (torch.arange(len(labels), device=device) != i) # tạo mask boolean pos bằng cách chọn các sample cùng lớp và loại anchor thứ i
+        neg_mask = (labels != anchor_label) # tạo mask boolean cho neg khác lớp với anchor
 
         if pos_mask.sum() == 0 or neg_mask.sum() == 0:
             continue
 
-        hardest_pos_dist = pairwise_dist[i][pos_mask].max()
-        neg_dists = pairwise_dist[i][neg_mask]
-        semi_hard_mask = (neg_dists > hardest_pos_dist) & (neg_dists < hardest_pos_dist + margin)
+        hardest_pos_dist = pairwise_dist[i][pos_mask].max() # tìm pos xa nhất 
+        neg_dists = pairwise_dist[i][neg_mask] # lấy khoảng cách của từng anchor đến negative
+        semi_hard_mask = (neg_dists > hardest_pos_dist) & (neg_dists < hardest_pos_dist + margin) # mask cho semi-hard
 
         if semi_hard_mask.sum() == 0:
             continue
 
-        hardest_semihard_dist = neg_dists[semi_hard_mask].min()
+        hardest_semihard_dist = neg_dists[semi_hard_mask].min() # chọn negative gần nhất có trong mask
         loss += F.relu(hardest_pos_dist - hardest_semihard_dist + margin)
         num_triplets += 1
 
@@ -354,7 +350,6 @@ def train_with_margin(margin, args, train_loader, val_loader, test_loader, in_ch
                           lr=args.lr,
                           momentum=args.momentum,
                           weight_decay=args.weight_decay)
-
     best_val_auc = 0.0
     best_epoch = -1
 

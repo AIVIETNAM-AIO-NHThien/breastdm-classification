@@ -43,7 +43,6 @@ class BreastDMDataset(Dataset):
         # Lưu danh sách nhãn để sampler dùng
         self.labels = [s["label"] for s in self.samples]
 
-        # Augmentation giống data_loader thường (Resize 256 -> RandomCrop 224 -> Resize 96)
         if augment:
             self.augmentation = transforms.Compose([
                 transforms.Resize([256, 256]),
@@ -55,15 +54,16 @@ class BreastDMDataset(Dataset):
             ])
         else:
             self.augmentation = transforms.Compose([
-                transforms.Resize([96, 96]),])
+                transforms.Resize([96, 96]),
+            ])
 
     def _build_samples(self) -> List[dict]:
         samples = []
         split_dir = os.path.join(self.root_dir, self.split)
         if not os.path.exists(split_dir):
             raise FileNotFoundError(f"Không tìm thấy thư mục split: {split_dir}")
-
-        for label_name in os.listdir(split_dir):
+        
+        for label_name in sorted(os.listdir(split_dir)):
             label_dir = os.path.join(split_dir, label_name)
             if not os.path.isdir(label_dir):
                 continue
@@ -71,7 +71,7 @@ class BreastDMDataset(Dataset):
             if label is None:
                 continue
 
-            for patient_id in os.listdir(label_dir):
+            for patient_id in sorted(os.listdir(label_dir)):
                 patient_path = os.path.join(label_dir, patient_id)
                 if not os.path.isdir(patient_path):
                     continue
@@ -80,10 +80,10 @@ class BreastDMDataset(Dataset):
                 if not os.path.exists(vibrant_dir):
                     continue
 
-                slice_names = [
+                slice_names = sorted(
                     f for f in os.listdir(vibrant_dir)
                     if f.lower().endswith(('.jpg', '.jpeg', '.png'))
-                ]
+                )
 
                 for slice_name in slice_names:
                     valid = True
@@ -109,9 +109,9 @@ class BreastDMDataset(Dataset):
         for folder in self.folders:
             img_path = os.path.join(patient_dir, folder, slice_name)
             img = Image.open(img_path).convert("L")
-            img_tensor = TF.to_tensor(img)
+            img_tensor = TF.to_tensor(img)  # (1, H, W)
             channels.append(img_tensor)
-        return torch.cat(channels, dim=0)
+        return torch.cat(channels, dim=0)  # (C, H, W)
 
     def _intensity_normalize(self, tensor: torch.Tensor) -> torch.Tensor:
         arr = tensor.numpy()
@@ -132,7 +132,7 @@ class BreastDMDataset(Dataset):
         label = sample["label"]
 
         # 1. Đọc và xếp chồng kênh
-        img = self._load_and_stack(patient_dir, slice_name)
+        img = self._load_and_stack(patient_dir, slice_name)  # (C, H, W)
 
         # 2. Augmentation (chỉ train)
         if self.augmentation is not None:
@@ -146,93 +146,31 @@ class BreastDMDataset(Dataset):
         return img, label
 
 
-# ============================================================
-# PKSAMPLER — P classes × K samples per class
-# ============================================================
-class PKSampler(Sampler):
-    """
-    PKSampler: mỗi batch có P class × K samples.
-
-    Class thiểu số được lặp lại (wrap-around) để đủ batch.
-    Không cắt bớt slices như TripletBatchSampler.
-
-    Ví dụ: P=2, K=16 → mỗi batch 32 slices (16 benign + 16 malignant).
-    Số batch = max(số batch có thể tạo từ mỗi class).
-    """
-    def __init__(self, dataset, P=2, K=16, shuffle=True):
-        self.P = P
-        self.K = K
-        self.batch_size = P * K
-        self.shuffle = shuffle
-
-        # Nhóm indices theo label
-        self.class_indices = {}
-        for idx, label in enumerate(dataset.labels):
-            if label not in self.class_indices:
-                self.class_indices[label] = []
-            self.class_indices[label].append(idx)
-
-        # Số batch = max(số batch có thể tạo từ mỗi class)
-        self.num_batches = max(
-            len(indices) // K for indices in self.class_indices.values()
-        )
-
-    def __iter__(self):
-        # Shuffle trong mỗi class
-        class_indices = {
-            c: idxs.copy() for c, idxs in self.class_indices.items()
-        }
-        if self.shuffle:
-            for idxs in class_indices.values():
-                random.shuffle(idxs)
-
-        # Con trỏ vòng lặp cho mỗi class
-        pointers = {c: 0 for c in class_indices}
-
-        for _ in range(self.num_batches):
-            batch = []
-            for c in class_indices.keys():
-                idxs = class_indices[c]
-                n = len(idxs)
-
-                # Lấy K samples, wrap-around nếu cần
-                for j in range(self.K):
-                    pos = (pointers[c] + j) % n
-                    batch.append(idxs[pos])
-
-                # Cập nhật pointer
-                pointers[c] = (pointers[c] + self.K) % n
-
-            if self.shuffle:
-                random.shuffle(batch)
-
-            yield batch
-
-    def __len__(self):
-        return self.num_batches
-
-
-# ============================================================
-# TRIPLETBATCHSAMPLER — Giữ lại để so sánh (không dùng mặc định)
-# ============================================================
 class TripletBatchSampler(Sampler):
     """
-    BatchSampler cho Triplet Loss (cách cũ):
-    Mỗi batch gồm batch_size mẫu, chia đều cho 2 lớp.
+    BatchSampler cho Triplet Loss:
+    Mỗi batch gồm batch_size mẫu, chia đều cho 2 lớp (batch_size/2 mỗi lớp).
+    Đảm bảo mỗi batch có cả benign và malignant để tạo triplet.
 
-    NHƯỢC ĐIỂM: Cắt bớt slices vì giới hạn bởi class nhỏ hơn.
+    ✅ FIX: dùng random.Random(seed) cục bộ thay vì random global,
+    để không bị ảnh hưởng bởi các lib khác dùng random (SVC, numpy,...).
     """
-    def __init__(self, dataset, batch_size, shuffle=True):
+    def __init__(self, dataset, batch_size, shuffle=True, seed=None):
         self.dataset = dataset
         self.batch_size = batch_size
         self.shuffle = shuffle
         self.num_per_class = batch_size // 2
+        self.rng = random.Random(seed)  # ✅ RNG cục bộ, tất định theo seed
 
         self.class_indices = {}
         for idx, label in enumerate(self.dataset.labels):
             if label not in self.class_indices:
                 self.class_indices[label] = []
             self.class_indices[label].append(idx)
+
+        # Fallback nếu thiếu lớp
+        if 0 not in self.class_indices or 1 not in self.class_indices:
+            raise ValueError("Dataset phải có đủ 2 lớp (0 và 1) cho TripletBatchSampler")
 
         self.num_batches = min(
             len(self.class_indices[0]) // self.num_per_class,
@@ -243,20 +181,20 @@ class TripletBatchSampler(Sampler):
         indices0 = self.class_indices[0].copy()
         indices1 = self.class_indices[1].copy()
         if self.shuffle:
-            random.shuffle(indices0)
-            random.shuffle(indices1)
+            self.rng.shuffle(indices0)
+            self.rng.shuffle(indices1)
 
         batches = []
         for i in range(self.num_batches):
             batch = []
             start = i * self.num_per_class
-            batch.extend(indices0[start:start+self.num_per_class])
-            batch.extend(indices1[start:start+self.num_per_class])
-            random.shuffle(batch)
+            batch.extend(indices0[start:start + self.num_per_class])
+            batch.extend(indices1[start:start + self.num_per_class])
+            self.rng.shuffle(batch)
             batches.append(batch)
 
         if self.shuffle:
-            random.shuffle(batches)
+            self.rng.shuffle(batches)
 
         for batch in batches:
             yield batch
@@ -265,24 +203,24 @@ class TripletBatchSampler(Sampler):
         return self.num_batches
 
 
-# ============================================================
-# CREATE DATALOADERS
-# ============================================================
+def _worker_init_fn(worker_id):
+    """✅ FIX: seed riêng cho từng worker để augmentation tất định."""
+    seed = torch.initial_seed() % 2**32
+    np.random.seed(seed)
+    random.seed(seed)
+
+
 def create_dataloaders(
     root_dir: str,
     experiment: str = "Exp-1",
     batch_size: int = 16,
     num_workers: int = 4,
     use_triplet: bool = False,
-    sampler_type: str = "pk",       # "pk" hoặc "triplet"
+    seed: int = 8,
 ) -> Tuple[DataLoader, DataLoader, DataLoader]:
     """
     Tạo DataLoader cho train, val, test.
-
-    Args:
-        sampler_type: "pk" (mặc định, không cắt bớt) hoặc "triplet" (cũ, cắt bớt).
-
-    Nếu use_triplet=True, train_loader sẽ dùng sampler_type chỉ định.
+    Nếu use_triplet=True, train_loader sẽ dùng TripletBatchSampler.
     """
     train_dataset = BreastDMDataset(
         root_dir=root_dir,
@@ -303,30 +241,20 @@ def create_dataloaders(
         augment=False,
     )
 
-    if use_triplet:
-        if sampler_type == "pk":
-            sampler = PKSampler(
-                train_dataset,
-                P=2,
-                K=batch_size // 2,
-                shuffle=True,
-            )
-        elif sampler_type == "triplet":
-            sampler = TripletBatchSampler(
-                train_dataset,
-                batch_size=batch_size,
-                shuffle=True,
-            )
-        else:
-            raise ValueError(f"sampler_type không hợp lệ: {sampler_type}")
+    # Generator riêng cho DataLoader để reproducible shuffle + worker seed
+    g = torch.Generator()
+    g.manual_seed(seed)
 
+    if use_triplet:
+        sampler = TripletBatchSampler(
+            train_dataset, batch_size=batch_size, shuffle=True, seed=seed,
+        )
         train_loader = DataLoader(
             train_dataset,
             batch_sampler=sampler,
             num_workers=num_workers,
+            worker_init_fn=_worker_init_fn,
         )
-        print(f"[{sampler_type.upper()}Sampler] Batches/epoch: {len(sampler)}, "
-              f"batch_size: {batch_size}")
     else:
         train_loader = DataLoader(
             train_dataset,
@@ -334,6 +262,8 @@ def create_dataloaders(
             shuffle=True,
             num_workers=num_workers,
             drop_last=True,
+            worker_init_fn=_worker_init_fn,
+            generator=g,
         )
 
     val_loader = DataLoader(
@@ -341,12 +271,14 @@ def create_dataloaders(
         batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,
+        worker_init_fn=_worker_init_fn,
     )
     test_loader = DataLoader(
         test_dataset,
         batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,
+        worker_init_fn=_worker_init_fn,
     )
 
     return train_loader, val_loader, test_loader
@@ -357,17 +289,12 @@ if __name__ == "__main__":
     train_loader, val_loader, test_loader = create_dataloaders(
         root_dir=root,
         experiment="Exp-2",
-        batch_size=32,
+        batch_size=8,
         num_workers=2,
-        use_triplet=True,
-        sampler_type="pk",
+        use_triplet=False,
+        seed=8,
     )
-
-    print(f"\nTrain dataset: {len(train_loader.dataset)} slices")
-    print(f"Batches/epoch: {len(train_loader)}")
-
     for imgs, labels in train_loader:
-        print(f"\nBatch shape: {imgs.shape}")
-        unique, counts = labels.unique(return_counts=True)
-        print(f"Labels trong batch: {dict(zip(unique.tolist(), counts.tolist()))}")
+        print(f"Batch shape: {imgs.shape}")
+        print(f"Labels: {labels}")
         break
