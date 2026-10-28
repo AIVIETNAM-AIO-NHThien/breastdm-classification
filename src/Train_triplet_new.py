@@ -11,7 +11,7 @@ from sklearn.svm import SVC
 
 # Import data loader và model
 from data_loader_triplet_fix_new import create_dataloaders
-from Fusion_triplet_zhang import FusionM
+from Fusion_triplet_new import FusionM
 
 # -------------------------------
 # Hàm tính Sensitivity và Specificity dùng Youden index (giống Train.py)
