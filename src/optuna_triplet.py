@@ -13,8 +13,8 @@ import torch.nn as nn
 import torch.optim as optim
 from sklearn.metrics import roc_auc_score
 from sklearn.svm import SVC
-from data_loader_triplet import create_dataloaders
-from Fusion_triplet_new import FusionM
+from data_loader_triplet_fix_new import create_dataloaders
+from Fusion_triplet_zhang import FusionM
 
 
 # ============================================================
