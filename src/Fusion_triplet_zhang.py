@@ -234,7 +234,7 @@ class FCUUp(nn.Module):
 # ======================== Main Fusion Model (LG‑CAFN) ========================
 class FusionM(nn.Module):
     def __init__(self, num_classes=2, in_c=9, load_vit=False, embedding_dim=128,
-                 dropout_fusion=0.2, dropout_emb=0.1):
+                 dropout_fusion=0.1, dropout_emb=0.3):
         super(FusionM, self).__init__()
         self.in_c = in_c
         self.load_vit_flag = load_vit
