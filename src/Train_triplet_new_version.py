@@ -7,7 +7,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 import joblib
-import shutil
 from sklearn.metrics import accuracy_score, roc_auc_score, roc_curve, confusion_matrix, classification_report
 from sklearn.svm import SVC
 
@@ -236,9 +235,14 @@ def train_with_margin(margin, args, train_loader, val_loader, test_loader, in_ch
         # BƯỚC 1: Train một epoch
         train_loss = train_one_epoch(epoch, model, train_loader, optimizer, device, margin)
 
-        # BƯỚC 2: Lưu Checkpoint của FusionM
-        model_save_path = os.path.join(save_dir, f'model_epoch_{epoch}.pth')
-        state_dict = model.module.state_dict() if isinstance(model, torch.nn.DataParallel) else model.state_dict()
+        # BƯỚC 2: Lưu checkpoint Model hiện tại.
+        # Dùng một tên file cố định để ghi đè mỗi epoch, không tích lũy 100 file.
+        model_save_path = os.path.join(save_dir, 'current_model.pth')
+        state_dict = (
+            model.module.state_dict()
+            if isinstance(model, torch.nn.DataParallel)
+            else model.state_dict()
+        )
         torch.save(state_dict, model_save_path)
         print(f'Model Checkpoint saved to {model_save_path}')
 
@@ -258,8 +262,9 @@ def train_with_margin(margin, args, train_loader, val_loader, test_loader, in_ch
         clf = SVC(kernel='rbf', C=args.svm_C, probability=True, random_state=42)
         clf.fit(X_train, y_train)
         
-        # BƯỚC 4: Lưu Checkpoint của SVM
-        svm_save_path = os.path.join(save_dir, f'svm_epoch_{epoch}.pkl')
+        # BƯỚC 4: Lưu checkpoint SVM hiện tại.
+        # Dùng một tên file cố định để ghi đè mỗi epoch.
+        svm_save_path = os.path.join(save_dir, 'current_svm.pkl')
         joblib.dump(clf, svm_save_path)
         print(f'SVM Checkpoint saved to {svm_save_path}')
 
@@ -269,18 +274,41 @@ def train_with_margin(margin, args, train_loader, val_loader, test_loader, in_ch
             model_save_path, svm_save_path, val_loader, in_channels, args, device, target_name='Val'
         )
 
-        # BƯỚC 6: Lưu lại best model nếu Val AUC tốt nhất
+        # BƯỚC 6: Chỉ giữ Best Model và Best SVM.
+        # Nếu Validation AUC cải thiện, chuyển file current thành file best.
+        # os.replace() thay thế file đích nếu đã tồn tại và không tạo thêm bản sao.
+        best_model_path = os.path.join(
+            save_dir,
+            f'best_model_triplet_only_{args.experiment}.pth'
+        )
+        best_svm_path = os.path.join(
+            save_dir,
+            f'best_svm_{args.experiment}.pkl'
+        )
+
         if val_auc > best_val_auc:
             best_val_auc = val_auc
             best_epoch = epoch
-            
-            best_model_path = os.path.join(save_dir, f'best_model_triplet_only_{args.experiment}.pth')
-            best_svm_path = os.path.join(save_dir, f'best_svm_{args.experiment}.pkl')
-            
-            shutil.copy(model_save_path, best_model_path)
-            shutil.copy(svm_save_path, best_svm_path)
-            
-            print(f'*** Best Model & SVM saved (Val AUC: {val_auc:.4f}) ***')
+
+            os.replace(model_save_path, best_model_path)
+            os.replace(svm_save_path, best_svm_path)
+
+            print(
+                f'*** Best Model & SVM updated '
+                f'(Epoch {epoch}, Val AUC: {val_auc:.4f}) ***'
+            )
+        else:
+            # Epoch hiện tại không tốt hơn: xóa 2 file tạm để giải phóng dung lượng.
+            if os.path.exists(model_save_path):
+                os.remove(model_save_path)
+
+            if os.path.exists(svm_save_path):
+                os.remove(svm_save_path)
+
+            print(
+                f'No improvement. Temporary checkpoints deleted. '
+                f'Best Val AUC: {best_val_auc:.4f} at epoch {best_epoch}'
+            )
 
     print(f'\nTraining finished for margin={margin}. Best validation AUC: {best_val_auc:.4f} at epoch {best_epoch}')
 
